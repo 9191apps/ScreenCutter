@@ -11,6 +11,7 @@ final class CaptureSession: NSObject, ObservableObject {
     @Published private(set) var windowHotKeyEnabled = true
     @Published private(set) var fullScreenConflict: HotKeyConflict = .none
     @Published private(set) var windowConflict: HotKeyConflict = .none
+    @Published private(set) var hasScreenRecordingAccess = ScreenRecordingPermission.isGranted
 
     private let hotKeys = HotKeyMonitor()
     private let overlay = OverlayController()
@@ -71,6 +72,14 @@ final class CaptureSession: NSObject, ObservableObject {
             name: NSApplication.didBecomeActiveNotification,
             object: nil
         )
+        // Permission can change in System Settings while the app keeps running.
+        // Re-check whenever a menu opens so the hint is always current.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(menuDidBeginTracking),
+            name: NSMenu.didBeginTrackingNotification,
+            object: nil
+        )
     }
 
     static var isRunningTests: Bool {
@@ -92,15 +101,29 @@ final class CaptureSession: NSObject, ObservableObject {
 
     private func startSelection() {
         guard phase == .idle else { return }
-        guard ScreenRecordingPermission.ensureAccess() else { return }
+        guard requestScreenRecordingAccess() else { return }
         phase = .selecting(nil)
         overlay.present(session: self)
         installKeyMonitor()
     }
 
+    /// macOS shows its own authorization prompt the first time; afterwards the
+    /// menu hint is the way back to System Settings.
+    private func requestScreenRecordingAccess() -> Bool {
+        let granted = ScreenRecordingPermission.request()
+        refreshScreenRecordingAccess()
+        return granted
+    }
+
+    private func refreshScreenRecordingAccess() {
+        let granted = ScreenRecordingPermission.isGranted
+        guard granted != hasScreenRecordingAccess else { return }
+        hasScreenRecordingAccess = granted
+    }
+
     func captureFullScreen() {
         guard phase == .idle else { return }
-        guard ScreenRecordingPermission.ensureAccess() else { return }
+        guard requestScreenRecordingAccess() else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
         let rect = SelectionGeometry.pixelAligned(screen.frame, scale: screen.backingScaleFactor)
@@ -116,7 +139,7 @@ final class CaptureSession: NSObject, ObservableObject {
 
     func beginWindowCapture() {
         guard phase == .idle else { return }
-        guard ScreenRecordingPermission.ensureAccess() else { return }
+        guard requestScreenRecordingAccess() else { return }
         listedWindows = []
         phase = .windowPicking(nil)
         overlay.present(session: self)
@@ -722,7 +745,12 @@ final class CaptureSession: NSObject, ObservableObject {
     }
 
     @objc private func applicationDidBecomeActive() {
+        refreshScreenRecordingAccess()
         refreshHotKey(shouldAlert: true)
+    }
+
+    @objc private func menuDidBeginTracking() {
+        refreshScreenRecordingAccess()
     }
 
     private func presentConflictAlert(_ conflict: HotKeyConflict) {

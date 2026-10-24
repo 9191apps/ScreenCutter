@@ -17,6 +17,13 @@ private struct CaptureMenu: View {
     @ObservedObject var session: CaptureSession
 
     var body: some View {
+        if !session.hasScreenRecordingAccess {
+            Button("未开启屏幕录制权限，点此打开系统设置…") {
+                ScreenRecordingPermission.openSystemSettings()
+            }
+            Divider()
+        }
+
         Button("截取区域") {
             session.begin()
         }

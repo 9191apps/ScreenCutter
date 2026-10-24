@@ -1,27 +1,22 @@
 import AppKit
 import CoreGraphics
-import Foundation
 
 enum ScreenRecordingPermission {
-    static func ensureAccess() -> Bool {
-        if CGPreflightScreenCaptureAccess() {
-            return true
-        }
-        if CGRequestScreenCaptureAccess() {
-            return true
-        }
-        presentDeniedAlert()
-        return false
+    static var isGranted: Bool {
+        CGPreflightScreenCaptureAccess()
     }
 
-    private static func presentDeniedAlert() {
-        let openSettings = AppAlert.show(
-            title: "需要屏幕录制权限",
-            message: "请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许 ScreenCutter。如果开关已经打开，先关掉再打开，然后从菜单栏完全退出 ScreenCutter 再重新打开。",
-            confirm: "打开系统设置",
-            cancel: "取消"
-        )
-        guard openSettings else { return }
+    /// Asks the system for access. The first request makes macOS show its own
+    /// authorization prompt, so the app intentionally does not show one.
+    @discardableResult
+    static func request() -> Bool {
+        if isGranted { return true }
+        return CGRequestScreenCaptureAccess()
+    }
+
+    /// The system only prompts on the first request. After a denial the user
+    /// has to turn the switch on in System Settings.
+    static func openSystemSettings() {
         let candidates = [
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
