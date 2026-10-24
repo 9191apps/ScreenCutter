@@ -22,3 +22,6 @@ scripts/e2e/artifacts/
 
 # Profiling
 *.profraw
+
+# Local signing certificate / team (see docs/signing.md)
+Config/Signing.local.xcconfig

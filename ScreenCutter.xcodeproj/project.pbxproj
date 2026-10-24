@@ -19,6 +19,7 @@
 /* Begin PBXFileReference section */
 		A082FEBF308BA8B700BB16D4 /* ScreenCutter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScreenCutter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A082FECC308BA8B800BB16D4 /* ScreenCutterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScreenCutterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A082FEE4308BA8B800BB16D4 /* Config/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -53,6 +54,7 @@
 			children = (
 				A082FEC1308BA8B700BB16D4 /* ScreenCutter */,
 				A082FECF308BA8B800BB16D4 /* ScreenCutterTests */,
+				A082FEE4308BA8B800BB16D4 /* Config/Signing.xcconfig */,
 				A082FEC0308BA8B700BB16D4 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -184,6 +186,7 @@
 /* Begin XCBuildConfiguration section */
 		A082FEDC308BA8B800BB16D4 /* Debug configuration for PBXProject "ScreenCutter" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A082FEE4308BA8B800BB16D4 /* Config/Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -245,6 +248,7 @@
 		};
 		A082FEDD308BA8B800BB16D4 /* Release configuration for PBXProject "ScreenCutter" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A082FEE4308BA8B800BB16D4 /* Config/Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -301,8 +305,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
@@ -330,8 +332,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
@@ -358,8 +358,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -381,8 +379,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;

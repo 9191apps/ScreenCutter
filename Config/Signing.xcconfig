@@ -1,0 +1,16 @@
+// Committed signing defaults. Keep personal certificate names and team IDs
+// out of the repository.
+//
+// For stable screen-recording permission across rebuilds, copy
+// Signing.local.xcconfig into this directory (it is gitignored) and fill in:
+//
+//   CODE_SIGN_IDENTITY = Apple Development: Your Name (TEAMID)
+//   DEVELOPMENT_TEAM = TEAMID
+//
+// Without that file the app falls back to ad-hoc signing: it still builds,
+// but macOS treats every rebuild as a new app for TCC.
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+
+#include? "Signing.local.xcconfig"
