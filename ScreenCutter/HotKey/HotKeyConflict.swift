@@ -11,27 +11,134 @@ nonisolated enum HotKeyConflict: Equatable, Sendable {
     case systemShortcut
     case otherApplication
 
-    var menuDetail: String? {
+    func menuDetail(for chord: HotKeyChord) -> String? {
         switch self {
         case .none:
             return nil
         case .systemShortcut:
-            return "⌘⇧2 与系统快捷键冲突"
+            return "\(chord.display) 与系统快捷键冲突"
         case .otherApplication:
-            return "⌘⇧2 已被其他应用占用"
+            return "\(chord.display) 已被其他应用占用"
         }
     }
 
-    var alertMessage: String? {
+    func alertMessage(for chord: HotKeyChord) -> String? {
         switch self {
         case .none:
             return nil
         case .systemShortcut:
-            return "⌘⇧2 与系统快捷键冲突。截屏仍可从菜单「截取区域」开始。"
+            return "\(chord.display) 与系统快捷键冲突。截屏仍可从菜单开始。"
         case .otherApplication:
-            return "⌘⇧2 已被其他应用占用。截屏仍可从菜单「截取区域」开始。"
+            return "\(chord.display) 已被其他应用占用。截屏仍可从菜单开始。"
         }
     }
+}
+
+nonisolated struct HotKeyChord: Equatable, Sendable {
+    var keyCode: Int
+    var carbonModifiers: UInt32
+
+    static let commandCarbon: UInt32 = 1 << 8
+    static let shiftCarbon: UInt32 = 1 << 9
+    static let optionCarbon: UInt32 = 1 << 11
+    static let controlCarbon: UInt32 = 1 << 12
+
+    static let regionCapture = HotKeyChord(
+        keyCode: HotKeyConflictChecker.captureKeyCode,
+        carbonModifiers: commandCarbon | shiftCarbon
+    )
+
+    /// Option-Shift-3. System screenshots already own Command-Shift-3/4/5.
+    static let fullScreen = HotKeyChord(
+        keyCode: 20,
+        carbonModifiers: optionCarbon | shiftCarbon
+    )
+
+    /// Option-Shift-4.
+    static let window = HotKeyChord(
+        keyCode: 21,
+        carbonModifiers: optionCarbon | shiftCarbon
+    )
+
+    var symbolicModifiers: UInt {
+        var modifiers: UInt = 0
+        if carbonModifiers & Self.commandCarbon != 0 { modifiers |= HotKeyConflictChecker.commandModifier }
+        if carbonModifiers & Self.shiftCarbon != 0 { modifiers |= HotKeyConflictChecker.shiftModifier }
+        if carbonModifiers & Self.optionCarbon != 0 { modifiers |= HotKeyConflictChecker.optionModifier }
+        if carbonModifiers & Self.controlCarbon != 0 { modifiers |= HotKeyConflictChecker.controlModifier }
+        return modifiers
+    }
+
+    var hasCommandOptionOrControl: Bool {
+        carbonModifiers & (Self.commandCarbon | Self.optionCarbon | Self.controlCarbon) != 0
+    }
+
+    var display: String {
+        var label = ""
+        if carbonModifiers & Self.controlCarbon != 0 { label += "⌃" }
+        if carbonModifiers & Self.optionCarbon != 0 { label += "⌥" }
+        if carbonModifiers & Self.shiftCarbon != 0 { label += "⇧" }
+        if carbonModifiers & Self.commandCarbon != 0 { label += "⌘" }
+        label += Self.keyLabel(for: keyCode)
+        return label
+    }
+
+    static func keyLabel(for keyCode: Int) -> String {
+        labels[keyCode] ?? "#\(keyCode)"
+    }
+
+    private static let labels: [Int: String] = [
+        0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+        8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
+        16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5",
+        24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0", 30: "]", 31: "O",
+        32: "U", 33: "[", 34: "I", 35: "P", 37: "L", 38: "J", 39: "'", 40: "K",
+        41: ";", 42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".", 49: "Space",
+        36: "Return", 48: "Tab", 51: "Delete", 53: "Esc",
+    ]
+}
+
+nonisolated enum HotKeyStore {
+    private static let keyCodeKey = "regionHotKey.keyCode"
+    private static let modifiersKey = "regionHotKey.carbonModifiers"
+
+    static func loadRegion(from defaults: UserDefaults = .standard) -> HotKeyChord {
+        guard defaults.object(forKey: keyCodeKey) != nil else { return .regionCapture }
+        return HotKeyChord(
+            keyCode: defaults.integer(forKey: keyCodeKey),
+            carbonModifiers: UInt32(defaults.integer(forKey: modifiersKey))
+        )
+    }
+
+    static func saveRegion(_ chord: HotKeyChord, to defaults: UserDefaults = .standard) {
+        defaults.set(chord.keyCode, forKey: keyCodeKey)
+        defaults.set(Int(chord.carbonModifiers), forKey: modifiersKey)
+    }
+
+    static func isEnabled(_ id: UInt32, defaults: UserDefaults = .standard) -> Bool {
+        let key = enabledKey(id)
+        guard defaults.object(forKey: key) != nil else { return true }
+        return defaults.bool(forKey: key)
+    }
+
+    static func setEnabled(_ id: UInt32, _ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: enabledKey(id))
+    }
+
+    private static func enabledKey(_ id: UInt32) -> String {
+        "hotKey.\(id).enabled"
+    }
+}
+
+nonisolated struct HotKeyRegistration: Equatable, Sendable {
+    var id: UInt32
+    var chord: HotKeyChord
+}
+
+nonisolated enum HotKeySlotID {
+    static let region: UInt32 = 1
+    static let fullScreen: UInt32 = 2
+    static let window: UInt32 = 3
 }
 
 nonisolated enum HotKeyConflictChecker {
@@ -56,8 +163,12 @@ nonisolated enum HotKeyConflictChecker {
         raw.values.compactMap(entry(from:))
     }
 
-    static func resolve(entries: [SymbolicHotKeyEntry], carbonStatus: Int32?) -> HotKeyConflict {
-        if hasSystemConflict(in: entries) {
+    static func resolve(
+        entries: [SymbolicHotKeyEntry],
+        carbonStatus: Int32?,
+        chord: HotKeyChord = .regionCapture
+    ) -> HotKeyConflict {
+        if hasSystemConflict(in: entries, chord: chord) {
             return .systemShortcut
         }
         guard let carbonStatus else { return .none }
@@ -67,11 +178,11 @@ nonisolated enum HotKeyConflictChecker {
         return .otherApplication
     }
 
-    private static func hasSystemConflict(in entries: [SymbolicHotKeyEntry]) -> Bool {
+    private static func hasSystemConflict(in entries: [SymbolicHotKeyEntry], chord: HotKeyChord) -> Bool {
         entries.contains { entry in
             entry.enabled
-                && entry.keyCode == captureKeyCode
-                && (entry.modifiers & relevantModifiers) == captureModifiers
+                && entry.keyCode == chord.keyCode
+                && (entry.modifiers & relevantModifiers) == chord.symbolicModifiers
         }
     }
 

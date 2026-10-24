@@ -15,3 +15,10 @@ xcuserdata/
 # Swift Package Manager
 .build/
 .swiftpm/
+
+# E2E helpers (generated)
+scripts/e2e/bin/
+scripts/e2e/artifacts/
+
+# Profiling
+*.profraw

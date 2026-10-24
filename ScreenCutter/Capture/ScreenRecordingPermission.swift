@@ -17,7 +17,7 @@ enum ScreenRecordingPermission {
     private static func presentDeniedAlert() {
         let openSettings = AppAlert.show(
             title: "需要屏幕录制权限",
-            message: "请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许 ScreenCutter。",
+            message: "请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许 ScreenCutter。如果开关已经打开，先关掉再打开，然后从菜单栏完全退出 ScreenCutter 再重新打开。",
             confirm: "打开系统设置",
             cancel: "取消"
         )

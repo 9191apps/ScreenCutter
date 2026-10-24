@@ -20,18 +20,82 @@ private struct CaptureMenu: View {
         Button("截取区域") {
             session.begin()
         }
-        .modifier(CaptureMenuShortcut(isEnabled: session.hotKeyConflict == .none))
+        .modifier(CaptureMenuShortcut(
+            isEnabled: session.hotKeyConflict == .none && session.regionChord == .regionCapture
+        ))
 
-        if let detail = session.hotKeyConflict.menuDetail {
+        if session.hotKeyConflict == .none, session.regionChord != .regionCapture {
+            Button(session.regionChord.display) {}
+                .disabled(true)
+        }
+        if let detail = session.hotKeyConflict.menuDetail(for: session.regionChord) {
             Button(detail) {}
                 .disabled(true)
         }
+        Button("拷贝文字") {
+            session.copyRecognizedText()
+        }
+        .disabled(!session.phase.isEditing)
+
+        Button("更改快捷键") {
+            session.beginHotKeyChange()
+        }
+
+        Divider()
+
+        Button("截取整屏") {
+            session.captureFullScreen()
+        }
+        hotKeyStatus(
+            enabled: session.fullScreenHotKeyEnabled,
+            chord: .fullScreen,
+            conflict: session.fullScreenConflict,
+            title: "整屏快捷键"
+        )
+        Toggle("使用整屏快捷键", isOn: Binding(
+            get: { session.fullScreenHotKeyEnabled },
+            set: { session.setFullScreenHotKeyEnabled($0) }
+        ))
+
+        Button("滚动长图") {
+            session.beginScrollCapture()
+        }
+
+        Button("截取窗口") {
+            session.beginWindowCapture()
+        }
+        hotKeyStatus(
+            enabled: session.windowHotKeyEnabled,
+            chord: .window,
+            conflict: session.windowConflict,
+            title: "窗口快捷键"
+        )
+        Toggle("使用窗口快捷键", isOn: Binding(
+            get: { session.windowHotKeyEnabled },
+            set: { session.setWindowHotKeyEnabled($0) }
+        ))
 
         Divider()
 
         Button("退出") {
             NSApplication.shared.terminate(nil)
         }
+    }
+}
+
+@ViewBuilder
+private func hotKeyStatus(
+    enabled: Bool,
+    chord: HotKeyChord,
+    conflict: HotKeyConflict,
+    title: String
+) -> some View {
+    if enabled, let detail = conflict.menuDetail(for: chord) {
+        Button(detail) {}
+            .disabled(true)
+    } else if enabled, conflict == .none {
+        Button("\(title) \(chord.display)") {}
+            .disabled(true)
     }
 }
 

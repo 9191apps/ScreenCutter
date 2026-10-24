@@ -22,10 +22,20 @@ struct SelectionDrag: Equatable {
     }
 }
 
+struct WindowHover: Equatable {
+    var screenID: CGDirectDisplayID
+    var screenFrame: CGRect
+    var scale: CGFloat
+    var globalRect: CGRect
+    var title: String
+}
+
 enum CapturePhase: Equatable {
     case idle
     case selecting(SelectionDrag?)
+    case windowPicking(WindowHover?)
     case actionBar(ScreenSelection)
+    case editing(ScreenSelection)
     case working(ScreenSelection)
 
     var isSelecting: Bool {
@@ -33,8 +43,18 @@ enum CapturePhase: Equatable {
         return false
     }
 
+    var isPickingWindow: Bool {
+        if case .windowPicking = self { return true }
+        return false
+    }
+
     var showsActionBar: Bool {
         if case .actionBar = self { return true }
+        return false
+    }
+
+    var isEditing: Bool {
+        if case .editing = self { return true }
         return false
     }
 }

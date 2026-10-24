@@ -25,6 +25,7 @@ final class OverlayController {
             window.backgroundColor = .clear
             window.hasShadow = false
             window.ignoresMouseEvents = false
+            window.acceptsMouseMovedEvents = true
             window.hidesOnDeactivate = false
             window.isReleasedWhenClosed = false
             window.animationBehavior = .none
@@ -53,7 +54,9 @@ final class OverlayController {
         for window in windows {
             window.orderFrontRegardless()
         }
-        windows.first?.makeKey()
+        let mouse = NSEvent.mouseLocation
+        let keyWindow = windows.first { $0.frame.contains(mouse) } ?? windows.first
+        keyWindow?.makeKeyAndOrderFront(nil)
     }
 
     func close() {

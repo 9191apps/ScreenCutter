@@ -35,19 +35,13 @@ enum ImageExport {
             throw CaptureError.encodingFailed
         }
 
-        let previousPolicy = NSApp.activationPolicy()
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
-        defer {
-            NSApp.setActivationPolicy(previousPolicy)
-        }
-
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = suggestedFilename()
         panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
         panel.canCreateDirectories = true
 
+        NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else {
             return .cancelled
         }

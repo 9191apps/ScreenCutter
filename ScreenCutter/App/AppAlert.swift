@@ -14,4 +14,17 @@ enum AppAlert {
         }
         return alert.runModal() == .alertFirstButtonReturn
     }
+
+    /// Index of the chosen button, starting at 0.
+    static func choose(title: String, message: String, buttons: [String]) -> Int {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        for button in buttons {
+            alert.addButton(withTitle: button)
+        }
+        let response = alert.runModal().rawValue
+        return response - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+    }
 }
