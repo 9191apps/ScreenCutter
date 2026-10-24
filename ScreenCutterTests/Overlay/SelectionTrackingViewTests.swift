@@ -47,6 +47,168 @@ final class SelectionTrackingViewTests: XCTestCase {
         XCTAssertTrue(chrome.resizeHandlePoints.isEmpty)
     }
 
+    func testCursorIntentsForSelectionPhases() throws {
+        let overlay = try makeOverlay()
+        let selection = overlay.selection
+
+        overlay.session.setPhaseForTesting(.selecting(nil))
+        XCTAssertEqual(overlay.view.cursorIntent(at: CGPoint(x: 20, y: 20)), .crosshair)
+
+        overlay.session.setPhaseForTesting(.windowPicking(nil))
+        XCTAssertEqual(overlay.view.cursorIntent(at: CGPoint(x: 20, y: 20)), .arrow)
+
+        overlay.session.setPhaseForTesting(.windowPicking(WindowHover(
+            screenID: overlay.screen.displayID,
+            screenFrame: overlay.screen.frame,
+            scale: overlay.screen.backingScaleFactor,
+            globalRect: selection.globalRect,
+            title: "Window"
+        )))
+        XCTAssertEqual(overlay.view.cursorIntent(at: CGPoint(x: 20, y: 20)), .pointingHand)
+
+        overlay.session.setPhaseForTesting(.working(selection))
+        XCTAssertEqual(overlay.view.cursorIntent(at: CGPoint(x: 20, y: 20)), .arrow)
+    }
+
+    func testCursorIntentsForActionBarSelection() throws {
+        let overlay = try makeOverlay()
+        let local = selectionViewRect(overlay.selection, screen: overlay.screen)
+
+        overlay.session.setPhaseForTesting(.actionBar(overlay.selection))
+
+        XCTAssertEqual(
+            overlay.view.cursorIntent(at: CGPoint(x: local.midX, y: local.midY)),
+            .openHand
+        )
+        XCTAssertEqual(
+            overlay.view.cursorIntent(at: CGPoint(x: local.minX, y: local.minY)),
+            .resize(.minXminY)
+        )
+        XCTAssertEqual(
+            overlay.view.cursorIntent(at: CGPoint(x: local.minX - 40, y: local.midY)),
+            .arrow
+        )
+    }
+
+    func testCursorIntentsForAnnotations() throws {
+        let overlay = try makeOverlay()
+        let image = try XCTUnwrap(makeImage(width: 800, height: 600))
+        overlay.session.setEditingImageForTesting(image)
+        overlay.session.setPhaseForTesting(.editing(overlay.selection))
+
+        let window = NSWindow(
+            contentRect: overlay.screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = overlay.view
+        overlay.view.layoutSubtreeIfNeeded()
+
+        let canvas = try XCTUnwrap(
+            overlay.view.subviews.compactMap { $0 as? AnnotationCanvasView }.first
+        )
+        let local = SelectionGeometry.displayLocalRect(
+            selection: overlay.selection.globalRect,
+            screenFrame: overlay.screen.frame
+        )
+        let imageFrame = CGRect(
+            x: local.minX,
+            y: overlay.view.bounds.height - local.maxY,
+            width: local.width,
+            height: local.height
+        )
+        let rectangle = CGRect(
+            x: local.minX + 100,
+            y: imageFrame.maxY - 150,
+            width: 50,
+            height: 50
+        )
+        let imageRect = AnnotationGeometry.imageRect(
+            viewRect: rectangle,
+            imageFrame: imageFrame,
+            imageSize: CGSize(width: image.width, height: image.height)
+        )
+        overlay.session.setAnnotationDraft(.rectangle(imageRect, overlay.session.annotation.style))
+        overlay.session.commitAnnotationDraft()
+        XCTAssertEqual(overlay.session.selectedAnnotation, 0)
+
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.midX, y: rectangle.midY)),
+            .openHand
+        )
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.minX, y: rectangle.minY)),
+            .resize(.minXminY)
+        )
+
+        // A selected rectangle shows the move cursor while dragging.
+        canvas.mouseDown(
+            with: mouseEvent(.leftMouseDown, at: CGPoint(x: rectangle.midX, y: rectangle.midY), in: window)
+        )
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.midX, y: rectangle.midY)),
+            .closedHand
+        )
+        canvas.mouseUp(
+            with: mouseEvent(.leftMouseUp, at: CGPoint(x: rectangle.midX, y: rectangle.midY), in: window)
+        )
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.midX, y: rectangle.midY)),
+            .openHand
+        )
+
+        // A selected rectangle's handle shows the matching resize cursor.
+        canvas.mouseDown(
+            with: mouseEvent(.leftMouseDown, at: CGPoint(x: rectangle.minX, y: rectangle.minY), in: window)
+        )
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.minX, y: rectangle.minY)),
+            .resize(.minXminY)
+        )
+        canvas.mouseUp(
+            with: mouseEvent(.leftMouseUp, at: CGPoint(x: rectangle.minX, y: rectangle.minY), in: window)
+        )
+
+        // An unselected annotation is clickable, so hover shows a pointing
+        // hand. Once the drag threshold starts a new stroke, it becomes a
+        // crosshair so the cursor matches what the drag is doing.
+        overlay.session.selectAnnotation(at: nil)
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: rectangle.midX, y: rectangle.midY)),
+            .pointingHand
+        )
+
+        let drawStart = CGPoint(x: rectangle.midX, y: rectangle.midY)
+        let drawEnd = CGPoint(x: drawStart.x + 12, y: drawStart.y + 12)
+        canvas.mouseDown(with: mouseEvent(.leftMouseDown, at: drawStart, in: window))
+        XCTAssertEqual(canvas.cursorIntent(at: drawStart), .pointingHand)
+        canvas.mouseDragged(with: mouseEvent(.leftMouseDragged, at: drawEnd, in: window))
+        XCTAssertEqual(canvas.cursorIntent(at: drawEnd), .crosshair)
+        canvas.mouseUp(with: mouseEvent(.leftMouseUp, at: drawEnd, in: window))
+
+        XCTAssertEqual(overlay.session.annotation.strokes.count, 2)
+        XCTAssertEqual(overlay.session.selectedAnnotation, 1)
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: local.minX + 10, y: imageFrame.maxY - 10)),
+            .crosshair
+        )
+
+        // The text tool places text rather than moving an annotation.
+        overlay.session.setAnnotationTool(.text)
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(x: local.minX + 50, y: imageFrame.maxY - 50)),
+            .iBeam
+        )
+        XCTAssertEqual(
+            canvas.cursorIntent(at: CGPoint(
+                x: canvas.toolbarView.frame.midX,
+                y: canvas.toolbarView.frame.midY
+            )),
+            .arrow
+        )
+    }
+
     func testEditingPhaseShowsAnnotationToolbarAndHidesSelectionActionBar() throws {
         let overlay = try makeOverlay()
 
@@ -370,6 +532,15 @@ final class SelectionTrackingViewTests: XCTestCase {
         }
         XCTAssertEqual(start, CGPoint(x: 540, y: 380))
         XCTAssertEqual(end, CGPoint(x: 740, y: 280))
+    }
+
+    private func selectionViewRect(_ selection: ScreenSelection, screen: NSScreen) -> CGRect {
+        CGRect(
+            x: selection.globalRect.minX - screen.frame.minX,
+            y: selection.globalRect.minY - screen.frame.minY,
+            width: selection.globalRect.width,
+            height: selection.globalRect.height
+        )
     }
 
     private func lastRectangle(in session: CaptureSession) -> CGRect? {

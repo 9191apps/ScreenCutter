@@ -24,6 +24,12 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var moveStartImage: CGPoint?
     private var moveOriginalStroke: AnnotationStroke?
     private var moveDidRecordUndo = false
+    /// Cursor held for the duration of a move or resize. The normal hover
+    /// resolution resumes as soon as the drag ends.
+    private var interactionCursor: CursorIntent?
+    /// The selection this canvas was last laid out for. Reading `session.phase`
+    /// during `@Published` `willSet` would still see the previous phase.
+    private var layoutSelection: ScreenSelection?
 
     init(session: CaptureSession) {
         self.session = session
@@ -36,6 +42,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         observation = session.annotationChanges.sink { [weak self] _ in
             self?.refreshToolbarState()
             self?.needsDisplay = true
+            self?.refreshParentCursor()
         }
     }
 
@@ -56,6 +63,45 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     var isEditingText: Bool {
         textField != nil
+    }
+
+    /// Resolves the cursor for a point in the canvas's coordinates.
+    func cursorIntent(at point: CGPoint) -> CursorIntent {
+        if let interactionCursor {
+            return interactionCursor
+        }
+        if convert(toolbar.bounds, from: toolbar).contains(point) {
+            return .arrow
+        }
+        if let textField, textField.frame.contains(point) {
+            return .iBeam
+        }
+        guard session.editingImage != nil else { return .arrow }
+        // Resize handles can sit just outside the image edge, so check them
+        // before rejecting points outside the image.
+        if let index = session.selectedAnnotation,
+           session.annotation.strokes.indices.contains(index),
+           case .rectangle = session.annotation.strokes[index],
+           let rect = viewRect(forRectangleAt: index),
+           let handle = SelectionGeometry.hitHandle(point: point, in: rect),
+           handle != .move {
+            return .resize(handle)
+        }
+        let pointInImage = imagePoint(at: point)
+        guard imageBounds.contains(pointInImage) else { return .arrow }
+        // With the text tool a click always starts text, even over an existing
+        // annotation, so the I-beam is the honest cursor there.
+        if session.annotation.tool == .text {
+            return .iBeam
+        }
+        if let index = session.annotation.hitTestIndex(at: pointInImage, tolerance: hitTolerance) {
+            return index == session.selectedAnnotation ? .openHand : .pointingHand
+        }
+        return .crosshair
+    }
+
+    private func refreshParentCursor() {
+        (superview as? SelectionTrackingView)?.refreshCursor()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -133,6 +179,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             pendingAnnotationAnchor = nil
             session.selectAnnotation(at: nil)
             startStroke(at: anchor)
+            refreshParentCursor()
             continueStroke(to: imagePoint(from: event))
             return
         }
@@ -145,6 +192,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             resizeHandle = nil
             resizeOrigin = nil
             resizeDidRecordUndo = false
+            interactionCursor = nil
+            refreshParentCursor()
             return
         }
         if movingAnnotation != nil {
@@ -162,9 +211,14 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         session.commitAnnotationDraft()
         dragAnchor = nil
         penPoints = []
+        interactionCursor = nil
+        refreshParentCursor()
     }
 
     private func startStroke(at point: CGPoint) {
+        // Keep the crosshair even when the stroke starts or passes over an
+        // existing annotation; otherwise hover would turn it into a hand.
+        interactionCursor = .crosshair
         switch session.annotation.tool {
         case .rectangle, .arrow:
             dragAnchor = point
@@ -198,6 +252,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             textField?.removeFromSuperview()
             textField = nil
             textOrigin = nil
+            refreshParentCursor()
             return true
         }
         return false
@@ -236,6 +291,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         resizeHandle = handle
         resizeOrigin = viewRect
         resizeDidRecordUndo = false
+        interactionCursor = .resize(handle)
+        refreshParentCursor()
         return true
     }
 
@@ -270,6 +327,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         moveDidRecordUndo = false
         resizeHandle = nil
         resizeOrigin = nil
+        interactionCursor = .closedHand
+        refreshParentCursor()
     }
 
     private func updateMove(with event: NSEvent) {
@@ -294,6 +353,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         moveStartImage = nil
         moveOriginalStroke = nil
         moveDidRecordUndo = false
+        interactionCursor = nil
+        refreshParentCursor()
     }
 
     private func viewRect(forRectangleAt index: Int) -> CGRect? {
@@ -354,6 +415,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func beginText(at imagePoint: CGPoint, viewPoint: CGPoint) {
+        interactionCursor = nil
         textField?.removeFromSuperview()
         let field = NSTextField(string: "")
         field.placeholderString = "文字"
@@ -366,6 +428,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(field)
         textField = field
         textOrigin = imagePoint
+        refreshParentCursor()
     }
 
     private func commitText() {
@@ -375,9 +438,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         self.textField = nil
         self.textOrigin = nil
         let stroke = AnnotationStroke.text(string, textOrigin, session.annotation.style)
-        guard AnnotationDocument.isVisible(stroke) else { return }
+        guard AnnotationDocument.isVisible(stroke) else {
+            refreshParentCursor()
+            return
+        }
         session.setAnnotationDraft(stroke)
         session.commitAnnotationDraft()
+        refreshParentCursor()
     }
 
     private func installToolbar() {
@@ -484,6 +551,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// The selection is passed in because the overlay lays out during `@Published` `willSet`,
     /// when `session.phase` still holds the previous phase.
     func placeToolbar(in viewBounds: CGRect, selection: ScreenSelection) {
+        layoutSelection = selection
         guard viewBounds.width > 1, viewBounds.height > 1 else {
             toolbar.isHidden = true
             return
@@ -559,13 +627,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         session.cancel()
     }
 
-    private var editingSelection: ScreenSelection? {
-        if case .editing(let selection) = session.phase { return selection }
-        return nil
-    }
-
     private var selectionLocal: CGRect {
-        guard let selection = editingSelection else { return .zero }
+        guard let selection = layoutSelection else { return .zero }
         return SelectionGeometry.displayLocalRect(selection: selection.globalRect, screenFrame: selection.screenFrame)
     }
 
@@ -580,9 +643,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func imagePoint(from event: NSEvent) -> CGPoint {
+        imagePoint(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private func imagePoint(at viewPoint: CGPoint) -> CGPoint {
         guard let image = session.editingImage else { return .zero }
         return AnnotationGeometry.imagePoint(
-            viewPoint: convert(event.locationInWindow, from: nil),
+            viewPoint: viewPoint,
             viewSize: bounds.size,
             selectionLocal: selectionLocal,
             imageSize: CGSize(width: image.width, height: image.height)

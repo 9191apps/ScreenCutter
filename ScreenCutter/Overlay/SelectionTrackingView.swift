@@ -22,6 +22,10 @@ final class SelectionTrackingView: NSView {
     /// subscription would see the previous value. The publisher's value is the
     /// only reliable snapshot at layout time.
     private var laidOutPhase: CapturePhase = .idle
+    /// The cursor to keep while a drag is in progress. The modal event loops
+    /// below do not dispatch mouse-moved events, so the cursor has to be set
+    /// explicitly when a drag starts.
+    private var dragCursor: CursorIntent?
 
     init(session: CaptureSession, screen: NSScreen) {
         self.session = session
@@ -52,12 +56,28 @@ final class SelectionTrackingView: NSView {
                 self?.layoutActionBar()
             },
         ]
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActiveForCursor),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidBecomeKeyForCursor(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
         layoutDim()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -84,8 +104,15 @@ final class SelectionTrackingView: NSView {
         return nil
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshCursor()
+    }
+
     override func resetCursorRects() {
-        let cursor: NSCursor = laidOutPhase.isPickingWindow ? .pointingHand : .crosshair
+        // The base cursor covers the whole overlay. `updateCursor(at:)` refines
+        // it for selection edges, annotations, and the toolbars as the mouse moves.
+        let cursor: NSCursor = laidOutPhase.isSelecting ? .crosshair : .arrow
         addCursorRect(bounds, cursor: cursor)
     }
 
@@ -96,7 +123,7 @@ final class SelectionTrackingView: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseMoved, .inVisibleRect],
+            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -104,13 +131,85 @@ final class SelectionTrackingView: NSView {
         trackingArea = area
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        updateCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        guard session.phase.isPickingWindow else { return }
-        session.updateWindowHover(
-            at: globalPoint(from: event),
-            screenID: displayID,
-            screenFrame: screenFrame,
-            scale: scale
+        let local = convert(event.locationInWindow, from: nil)
+        if session.phase.isPickingWindow {
+            session.updateWindowHover(
+                at: globalPoint(from: event),
+                screenID: displayID,
+                screenFrame: screenFrame,
+                scale: scale
+            )
+        }
+        updateCursor(at: local)
+    }
+
+    /// Reapplies the cursor for the current mouse location. Used after phase
+    /// changes and when the overlay becomes key, so the shape is right even
+    /// before the next mouse move.
+    func refreshCursor() {
+        guard let window, window.isVisible else { return }
+        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard bounds.contains(local) else { return }
+        updateCursor(at: local)
+    }
+
+    @objc private func applicationDidBecomeActiveForCursor() {
+        refreshCursor()
+    }
+
+    @objc private func windowDidBecomeKeyForCursor(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        refreshCursor()
+    }
+
+    /// Resolves the cursor for a point in this overlay's coordinates.
+    func cursorIntent(at point: CGPoint) -> CursorIntent {
+        if let dragCursor {
+            return dragCursor
+        }
+        switch laidOutPhase {
+        case .selecting:
+            return .crosshair
+        case .windowPicking(let hover):
+            guard let hover, hover.screenID == displayID else { return .arrow }
+            return .pointingHand
+        case .actionBar(let selection):
+            guard selection.screenID == displayID else { return .arrow }
+            if !barContainer.isHidden, barContainer.frame.contains(point) {
+                return .arrow
+            }
+            if let handle = SelectionGeometry.hitHandle(point: point, in: viewRect(for: selection)) {
+                return handle == .move ? .openHand : .resize(handle)
+            }
+            return .arrow
+        case .editing(let selection):
+            guard selection.screenID == displayID,
+                  let canvas = annotationCanvas,
+                  !canvas.isHidden else { return .arrow }
+            return canvas.cursorIntent(at: canvas.convert(point, from: self))
+        case .working, .idle:
+            return .arrow
+        }
+    }
+
+    private func updateCursor(at point: CGPoint) {
+        // Always set the cursor instead of caching the last intent: the system
+        // can reset it when the app activates or the window becomes key, and a
+        // cache would then keep skipping the correction.
+        cursorIntent(at: point).cursor.set()
+    }
+
+    private func viewRect(for selection: ScreenSelection) -> CGRect {
+        CGRect(
+            x: selection.globalRect.minX - screenFrame.minX,
+            y: selection.globalRect.minY - screenFrame.minY,
+            width: selection.globalRect.width,
+            height: selection.globalRect.height
         )
     }
 
@@ -130,6 +229,8 @@ final class SelectionTrackingView: NSView {
             if case .actionBar(let selection) = session.phase,
                let handle = SelectionGeometry.hitHandle(point: global, in: selection.globalRect) {
                 session.beginAdjustment(handle: handle, at: global)
+                dragCursor = handle == .move ? .closedHand : .resize(handle)
+                refreshCursor()
                 trackAdjustment(from: event)
                 return
             }
@@ -143,6 +244,10 @@ final class SelectionTrackingView: NSView {
     }
 
     private func trackDrag(from event: NSEvent) {
+        defer {
+            dragCursor = nil
+            refreshCursor()
+        }
         var anchor = globalPoint(from: event)
         var current = anchor
         var lastMouse = anchor
@@ -160,10 +265,14 @@ final class SelectionTrackingView: NSView {
             }
             if next.type == .keyDown, next.keyCode == CaptureKeyCode.space, !next.isARepeat {
                 spaceMove = (anchor, current, lastMouse)
+                dragCursor = .closedHand
+                refreshCursor()
                 continue
             }
             if next.type == .keyUp, next.keyCode == CaptureKeyCode.space {
                 spaceMove = nil
+                dragCursor = nil
+                refreshCursor()
                 continue
             }
             if next.type == .keyDown || next.type == .keyUp {
@@ -193,6 +302,10 @@ final class SelectionTrackingView: NSView {
     }
 
     private func trackAdjustment(from event: NSEvent) {
+        defer {
+            dragCursor = nil
+            refreshCursor()
+        }
         var lastMouse = globalPoint(from: event)
         let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp, .keyDown, .keyUp]
         while true {
@@ -205,6 +318,8 @@ final class SelectionTrackingView: NSView {
             }
             if current.type == .keyDown, current.keyCode == CaptureKeyCode.space, !current.isARepeat {
                 session.beginAdjustment(handle: .move, at: lastMouse)
+                dragCursor = .closedHand
+                refreshCursor()
                 continue
             }
             if current.type == .keyDown || current.type == .keyUp {
@@ -291,6 +406,7 @@ final class SelectionTrackingView: NSView {
         layoutActionBar()
         layoutAnnotationCanvas()
         window?.invalidateCursorRects(for: self)
+        refreshCursor()
     }
 
     private func layoutDim() {

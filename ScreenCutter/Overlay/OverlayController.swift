@@ -34,29 +34,48 @@ final class OverlayController {
             windows.append(window)
         }
 
-        NSApp.activate()
+        // The overlay must take focus even when another app is interacting;
+        // `activate()` alone is cooperative and may not activate the app.
+        NSApp.activate(ignoringOtherApps: true)
         let mouse = NSEvent.mouseLocation
         let keyWindow = windows.first { $0.frame.contains(mouse) } ?? windows.first
         for window in windows {
             window.orderFrontRegardless()
         }
         keyWindow?.makeKeyAndOrderFront(nil)
+        refreshCursors()
+        // Activation can finish after the window becomes key and reset the
+        // cursor; reapply once the run loop has processed it.
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshCursors()
+        }
     }
 
     func hide() {
         for window in windows {
             window.orderOut(nil)
         }
+        NSCursor.arrow.set()
     }
 
     func show() {
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         for window in windows {
             window.orderFrontRegardless()
         }
         let mouse = NSEvent.mouseLocation
         let keyWindow = windows.first { $0.frame.contains(mouse) } ?? windows.first
         keyWindow?.makeKeyAndOrderFront(nil)
+        refreshCursors()
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshCursors()
+        }
+    }
+
+    private func refreshCursors() {
+        for window in windows {
+            (window.contentView as? SelectionTrackingView)?.refreshCursor()
+        }
     }
 
     func close() {
@@ -65,6 +84,7 @@ final class OverlayController {
             window.close()
         }
         windows.removeAll()
+        NSCursor.arrow.set()
     }
 
     func showHUD(_ message: String, screenFrame: CGRect) {
