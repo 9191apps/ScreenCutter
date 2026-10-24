@@ -23,6 +23,11 @@ final class CaptureSession: NSObject, ObservableObject {
     private(set) var selectedAnnotation: Int?
     let annotationChanges = PassthroughSubject<Void, Never>()
     @Published private(set) var scrollIntent = false
+    @Published private(set) var showLoupe: Bool
+    @Published private(set) var previewRect: PixelRect?
+    @Published private(set) var snapshotVersion = 0
+
+    private static let showLoupeKey = "showSelectionLoupe"
 
     /// One undo step: the strokes as they were before an edit. Tool, color, and
     /// line width are intentionally not stored, so undo does not change them.
@@ -34,9 +39,13 @@ final class CaptureSession: NSObject, ObservableObject {
     private var annotationUndoStack: [AnnotationUndoStep] = []
 
     var editingImage: CGImage? { frozenImage }
-    private var adjustmentOrigin: CGRect?
+    private var adjustmentOrigin: PixelRect?
     private var adjustmentHandle: SelectionHandle?
-    private var adjustmentAnchor: CGPoint?
+    private var adjustmentAnchor: PixelPoint?
+    private var snapWindows: [ListedWindow] = []
+    private var displaySnapshots: [CGDirectDisplayID: CGImage] = [:]
+    private var snapshotDates: [CGDirectDisplayID: Date] = [:]
+    private var snapshotRequests: Set<CGDirectDisplayID> = []
 
 #if DEBUG
     /// Testing hook: drives the overlay without screen recording permission or a live capture.
@@ -52,6 +61,7 @@ final class CaptureSession: NSObject, ObservableObject {
 #endif
 
     override init() {
+        showLoupe = UserDefaults.standard.object(forKey: Self.showLoupeKey) as? Bool ?? true
         super.init()
         regionChord = HotKeyStore.loadRegion()
         hotKeys.onPressed = { [weak self] id in
@@ -105,6 +115,11 @@ final class CaptureSession: NSObject, ObservableObject {
         phase = .selecting(nil)
         overlay.present(session: self)
         installKeyMonitor()
+        let mouse = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
+            ensureSnapshot(displayID: screen.displayID)
+        }
+        refreshSnapWindows()
     }
 
     /// macOS shows its own authorization prompt the first time; afterwards the
@@ -126,12 +141,10 @@ final class CaptureSession: NSObject, ObservableObject {
         guard requestScreenRecordingAccess() else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
-        let rect = SelectionGeometry.pixelAligned(screen.frame, scale: screen.backingScaleFactor)
+        let metrics = screen.displayMetrics
         phase = .actionBar(ScreenSelection(
-            screenID: screen.displayID,
-            screenFrame: screen.frame,
-            scale: screen.backingScaleFactor,
-            globalRect: rect
+            metrics: metrics,
+            pixelRect: PixelRect(x: 0, y: 0, width: metrics.pixelWidth, height: metrics.pixelHeight)
         ))
         overlay.present(session: self)
         installKeyMonitor()
@@ -157,33 +170,25 @@ final class CaptureSession: NSObject, ObservableObject {
         }
     }
 
-    func updateWindowHover(at point: CGPoint, screenID: CGDirectDisplayID, screenFrame: CGRect, scale: CGFloat) {
+    func updateWindowHover(at point: CGPoint, metrics: DisplayMetrics) {
         guard phase.isPickingWindow else { return }
-        guard let hit = WindowGeometry.hit(point: point, windows: listedWindows, screenFrame: screenFrame) else {
+        guard let hit = WindowGeometry.hit(point: point, windows: listedWindows, screenFrame: metrics.pointFrame) else {
             phase = .windowPicking(nil)
             return
         }
         phase = .windowPicking(WindowHover(
-            screenID: screenID,
-            screenFrame: screenFrame,
-            scale: scale,
-            globalRect: hit.visibleFrame,
+            metrics: metrics,
+            pixelRect: metrics.pixelRect(for: hit.visibleFrame),
             title: hit.window.title
         ))
     }
 
-    func confirmWindow(at point: CGPoint, screenID: CGDirectDisplayID, screenFrame: CGRect, scale: CGFloat) {
+    func confirmWindow(at point: CGPoint, metrics: DisplayMetrics) {
         guard phase.isPickingWindow else { return }
-        guard let hit = WindowGeometry.hit(point: point, windows: listedWindows, screenFrame: screenFrame) else { return }
-        var rect = SelectionGeometry.pixelAligned(hit.visibleFrame, scale: scale)
-        rect = SelectionGeometry.clamped(rect, to: screenFrame)
-        guard SelectionGeometry.isSubstantial(rect) else { return }
-        phase = .actionBar(ScreenSelection(
-            screenID: screenID,
-            screenFrame: screenFrame,
-            scale: scale,
-            globalRect: rect
-        ))
+        guard let hit = WindowGeometry.hit(point: point, windows: listedWindows, screenFrame: metrics.pointFrame) else { return }
+        let pixelRect = metrics.pixelRect(for: hit.visibleFrame).clampedForSelection(in: metrics)
+        guard pixelRect.width >= 1, pixelRect.height >= 1 else { return }
+        phase = .actionBar(ScreenSelection(metrics: metrics, pixelRect: pixelRect))
     }
 
     func setFullScreenHotKeyEnabled(_ enabled: Bool) {
@@ -197,95 +202,251 @@ final class CaptureSession: NSObject, ObservableObject {
     }
 
     func updateDrag(
-        screenID: CGDirectDisplayID,
-        screenFrame: CGRect,
-        scale: CGFloat,
+        metrics: DisplayMetrics,
         anchor: CGPoint,
         current: CGPoint,
-        constrainSquare: Bool
+        constrainSquare: Bool,
+        snapEnabled: Bool
     ) {
         guard case .selecting(let existing) = phase else { return }
-        if let existing, existing.screenID != screenID { return }
+        if let existing, existing.metrics.screenID != metrics.screenID { return }
+        clearPreview()
+
+        var currentPoint = current
+        if snapEnabled, !constrainSquare {
+            let pixel = metrics.pixelPoint(for: current, rounded: true)
+            currentPoint = metrics.globalPoint(for: SnapEngine.snap(
+                point: pixel,
+                metrics: metrics,
+                candidates: snapCandidates(for: metrics),
+                threshold: SnapEngine.threshold(for: metrics)
+            ))
+        }
         phase = .selecting(SelectionDrag(
-            screenID: screenID,
-            screenFrame: screenFrame,
-            scale: scale,
+            metrics: metrics,
             anchor: anchor,
-            current: current,
+            current: currentPoint,
             constrainSquare: constrainSquare
+        ))
+    }
+
+    /// Rounds a drag start to the nearest pixel and, if enabled, to a screen or
+    /// window edge. The returned point is in global AppKit coordinates.
+    func snappedPoint(_ point: CGPoint, metrics: DisplayMetrics, enabled: Bool) -> CGPoint {
+        guard enabled else { return point }
+        let pixel = metrics.pixelPoint(for: point, rounded: true)
+        return metrics.globalPoint(for: SnapEngine.snap(
+            point: pixel,
+            metrics: metrics,
+            candidates: snapCandidates(for: metrics),
+            threshold: SnapEngine.threshold(for: metrics)
         ))
     }
 
     func endDrag(screenID: CGDirectDisplayID) {
         guard case .selecting(let drag) = phase, let drag, drag.screenID == screenID else { return }
-        let rect = drag.globalRect
-        guard SelectionGeometry.isSubstantial(rect) else {
+        clearPreview()
+        guard SelectionGeometry.isSubstantial(drag.globalRect) else {
             phase = .selecting(nil)
             return
         }
-        phase = .actionBar(ScreenSelection(
-            screenID: drag.screenID,
-            screenFrame: drag.screenFrame,
-            scale: drag.scale,
-            globalRect: rect
-        ))
+        // The loupe only runs during the drag; do not keep a full-screen frame
+        // alive for the action bar phase.
+        clearSnapshots()
+        phase = .actionBar(ScreenSelection(metrics: drag.metrics, pixelRect: drag.pixelRect))
     }
 
     func beginAdjustment(handle: SelectionHandle, at point: CGPoint) {
         guard case .actionBar(let selection) = phase else { return }
-        adjustmentOrigin = selection.globalRect
+        clearPreview()
+        adjustmentOrigin = selection.pixelRect
         adjustmentHandle = handle
-        adjustmentAnchor = point
+        adjustmentAnchor = selection.metrics.pixelPoint(for: point, rounded: true)
     }
 
-    func updateAdjustment(to point: CGPoint) {
+    func updateAdjustment(to point: CGPoint, snapEnabled: Bool) {
         guard case .actionBar(var selection) = phase,
               let handle = adjustmentHandle,
               let origin = adjustmentOrigin,
               let anchor = adjustmentAnchor else { return }
-        let next: CGRect
+
+        let metrics = selection.metrics
+        clearPreview()
+        let pointPixel = metrics.pixelPoint(for: point, rounded: true)
+        let candidates = snapCandidates(for: metrics)
+        let threshold = SnapEngine.threshold(for: metrics)
+        var next: PixelRect
+
         if handle == .move {
-            next = SelectionGeometry.moved(
-                origin,
-                by: CGPoint(x: point.x - anchor.x, y: point.y - anchor.y),
-                within: selection.screenFrame
-            )
+            let delta = PixelPoint(x: pointPixel.x - anchor.x, y: pointPixel.y - anchor.y)
+            next = PixelSelectionGeometry.moved(origin, by: delta, in: metrics)
+            if snapEnabled {
+                next = SnapEngine.snapMoved(
+                    next,
+                    metrics: metrics,
+                    candidates: candidates,
+                    threshold: threshold
+                )
+            }
         } else {
-            let resized = SelectionGeometry.resized(origin, handle: handle, to: point)
-            next = SelectionGeometry.clamped(resized, to: selection.screenFrame)
+            var target = pointPixel
+            if snapEnabled {
+                if PixelSelectionGeometry.movesX(handle),
+                   let candidate = SnapEngine.nearest(to: target.x, axis: .vertical, candidates: candidates, threshold: threshold) {
+                    target.x = candidate.coordinate
+                }
+                if PixelSelectionGeometry.movesY(handle),
+                   let candidate = SnapEngine.nearest(to: target.y, axis: .horizontal, candidates: candidates, threshold: threshold) {
+                    target.y = candidate.coordinate
+                }
+            }
+            next = PixelSelectionGeometry.resized(origin, handle: handle, to: target, minimum: 1, in: metrics)
         }
-        selection.globalRect = next
+
+        selection.pixelRect = next
         phase = .actionBar(selection)
     }
 
     func endAdjustment() {
         guard case .actionBar(var selection) = phase else { return }
-        var aligned = SelectionGeometry.pixelAligned(selection.globalRect, scale: selection.scale)
-        aligned = SelectionGeometry.clamped(aligned, to: selection.screenFrame)
-        if SelectionGeometry.isSubstantial(aligned) {
-            selection.globalRect = aligned
-        } else if let origin = adjustmentOrigin {
-            selection.globalRect = origin
-        }
-        phase = .actionBar(selection)
+        clearPreview()
+        selection.pixelRect = selection.pixelRect.clampedForSelection(in: selection.metrics)
         adjustmentHandle = nil
         adjustmentOrigin = nil
         adjustmentAnchor = nil
+        phase = .actionBar(selection)
     }
 
-    func nudge(direction: NudgeDirection, by step: CGFloat) {
+    func nudge(direction: NudgeDirection, step: Int) {
         guard case .actionBar(var selection) = phase else { return }
-        var next = SelectionGeometry.nudged(
-            selection.globalRect,
+        clearPreview()
+        selection.pixelRect = PixelSelectionGeometry.nudged(
+            selection.pixelRect,
             direction: direction,
-            step: step,
-            within: selection.screenFrame
+            step: max(1, step),
+            in: selection.metrics
         )
-        next = SelectionGeometry.pixelAligned(next, scale: selection.scale)
-        next = SelectionGeometry.clamped(next, to: selection.screenFrame)
-        guard SelectionGeometry.isSubstantial(next) else { return }
-        selection.globalRect = next
         phase = .actionBar(selection)
+    }
+
+    func resizeSelection(direction: NudgeDirection, step: Int) {
+        guard case .actionBar(var selection) = phase else { return }
+        clearPreview()
+        selection.pixelRect = PixelSelectionGeometry.adjustedTrailingEdge(
+            selection.pixelRect,
+            direction: direction,
+            step: max(1, step),
+            in: selection.metrics
+        )
+        phase = .actionBar(selection)
+    }
+
+    func setSelection(pixelRect: PixelRect) {
+        guard case .actionBar(var selection) = phase else { return }
+        clearPreview()
+        selection.pixelRect = pixelRect.clampedForSelection(in: selection.metrics)
+        phase = .actionBar(selection)
+    }
+
+    /// Updates only the preview chrome while the precision fields are edited. The
+    /// action bar keeps its position, so the popover does not chase the selection.
+    func previewSelection(_ pixelRect: PixelRect?) {
+        guard case .actionBar(let selection) = phase else {
+            previewRect = nil
+            return
+        }
+        guard let pixelRect else {
+            previewRect = nil
+            return
+        }
+        previewRect = pixelRect.clampedForSelection(in: selection.metrics)
+    }
+
+    private func clearPreview() {
+        if previewRect != nil {
+            previewRect = nil
+        }
+    }
+
+    private func adjustSelection(direction: NudgeDirection, step: Int, resizing: Bool) {
+        if resizing {
+            resizeSelection(direction: direction, step: step)
+        } else {
+            nudge(direction: direction, step: step)
+        }
+    }
+
+    private func snapCandidates(for metrics: DisplayMetrics) -> [SnapCandidate] {
+        SnapEngine.candidates(metrics: metrics, windows: snapWindows)
+    }
+
+    private func refreshSnapWindows() {
+        Task {
+            guard let windows = try? await WindowCatalog.frontToBack() else { return }
+            guard phase.isSelecting || phase.showsActionBar else { return }
+            snapWindows = windows
+        }
+    }
+
+    func setShowLoupe(_ enabled: Bool) {
+        showLoupe = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.showLoupeKey)
+        guard enabled, phase.isSelecting else { return }
+        let mouse = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
+            ensureSnapshot(displayID: screen.displayID)
+        }
+    }
+
+    func ensureSnapshot(displayID: CGDirectDisplayID) {
+        ensureSnapshot(displayID: displayID, force: false)
+    }
+
+    /// The loupe is a freeze-frame. Take a fresh one when a drag starts after the
+    /// previous capture has gone stale, while keeping the old image visible until
+    /// the new one arrives.
+    func refreshSnapshotIfStale(displayID: CGDirectDisplayID) {
+        guard showLoupe else { return }
+        if let date = snapshotDates[displayID], Date().timeIntervalSince(date) < 1 {
+            return
+        }
+        ensureSnapshot(displayID: displayID, force: true)
+    }
+
+    private func ensureSnapshot(displayID: CGDirectDisplayID, force: Bool) {
+        guard showLoupe, !snapshotRequests.contains(displayID) else { return }
+        if !force, displaySnapshots[displayID] != nil { return }
+        snapshotRequests.insert(displayID)
+        Task {
+            defer { snapshotRequests.remove(displayID) }
+            let pixelSize = NSScreen.screens
+                .first(where: { $0.displayID == displayID })?
+                .displayMetrics.pixelSize
+            guard let image = try? await ScreenCaptureService.snapshot(
+                displayID: displayID,
+                pixelSize: pixelSize
+            ) else { return }
+            guard phase.isSelecting else { return }
+            displaySnapshots[displayID] = image
+            snapshotDates[displayID] = Date()
+            snapshotVersion += 1
+        }
+    }
+
+    func snapshot(for displayID: CGDirectDisplayID) -> CGImage? {
+        displaySnapshots[displayID]
+    }
+
+    private func clearSnapshots() {
+        displaySnapshots.removeAll()
+        snapshotDates.removeAll()
+        snapshotRequests.removeAll()
+    }
+
+    private func clearSnapshotState() {
+        clearPreview()
+        clearSnapshots()
+        snapWindows.removeAll()
     }
 
     func cancel() {
@@ -298,6 +459,8 @@ final class CaptureSession: NSObject, ObservableObject {
         annotationUndoStack.removeAll()
         listedWindows = []
         scrollIntent = false
+        clearPreview()
+        clearSnapshotState()
         phase = .idle
     }
 
@@ -318,6 +481,7 @@ final class CaptureSession: NSObject, ObservableObject {
             case nil:
                 overlay.close()
                 scrollIntent = false
+                clearSnapshotState()
                 phase = .idle
                 AppAlert.show(title: "滚动长图失败", message: "没有截到可拼接的画面。")
             }
@@ -329,6 +493,7 @@ final class CaptureSession: NSObject, ObservableObject {
             try ImageExport.copyToPasteboard(image)
             overlay.close()
             scrollIntent = false
+            clearSnapshotState()
             phase = .idle
             overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             if let partialMessage {
@@ -337,6 +502,7 @@ final class CaptureSession: NSObject, ObservableObject {
         } catch {
             overlay.close()
             scrollIntent = false
+            clearSnapshotState()
             phase = .idle
             AppAlert.show(title: "滚动长图失败", message: error.localizedDescription)
         }
@@ -493,10 +659,12 @@ final class CaptureSession: NSObject, ObservableObject {
                 let image = try await ScreenCaptureService.capture(selection)
                 try ImageExport.copyToPasteboard(image)
                 overlay.close()
+                clearSnapshotState()
                 phase = .idle
                 overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             } catch {
                 overlay.close()
+                clearSnapshotState()
                 phase = .idle
                 AppAlert.show(title: "截屏失败", message: error.localizedDescription)
             }
@@ -519,6 +687,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 switch try ImageExport.saveWithPanel(image) {
                 case .saved:
                     overlay.close()
+                    clearSnapshotState()
                     phase = .idle
                     overlay.showHUD("已保存", screenFrame: selection.screenFrame)
                 case .cancelled:
@@ -588,6 +757,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 overlay.close()
                 frozenImage = nil
                 replaceAnnotation(AnnotationDocument())
+                clearSnapshotState()
                 phase = .idle
                 overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             } catch {
@@ -603,6 +773,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 overlay.close()
                 frozenImage = nil
                 replaceAnnotation(AnnotationDocument())
+                clearSnapshotState()
                 phase = .idle
                 overlay.showHUD("已保存", screenFrame: selection.screenFrame)
             case .cancelled:
@@ -647,10 +818,17 @@ final class CaptureSession: NSObject, ObservableObject {
             let keyCode = event.keyCode
             let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
             let command = event.modifierFlags.contains(.command)
+            let option = event.modifierFlags.contains(.option)
             let editingText = event.window?.firstResponder is NSTextView
             guard let self else { return event }
             let consumed = MainActor.assumeIsolated {
-                self.handleKeyCode(keyCode, nudgeStep: step, command: command, editingText: editingText)
+                self.handleKeyCode(
+                    keyCode,
+                    nudgeStep: step,
+                    command: command,
+                    editingText: editingText,
+                    option: option
+                )
             }
             return consumed ? nil : event
         }
@@ -674,7 +852,13 @@ final class CaptureSession: NSObject, ObservableObject {
         ))
     }
 
-    private func handleKeyCode(_ keyCode: UInt16, nudgeStep: CGFloat, command: Bool, editingText: Bool) -> Bool {
+    private func handleKeyCode(
+        _ keyCode: UInt16,
+        nudgeStep: CGFloat,
+        command: Bool,
+        editingText: Bool,
+        option: Bool
+    ) -> Bool {
         if editingText { return false }
         switch keyCode {
         case CaptureKeyCode.escape:
@@ -687,7 +871,7 @@ final class CaptureSession: NSObject, ObservableObject {
         case 6 where command && phase.isEditing:
             undoAnnotation()
             return true
-        case 51, 117 where phase.isEditing:
+        case 51 where phase.isEditing, 117 where phase.isEditing:
             guard selectedAnnotation != nil else { return false }
             deleteSelectedAnnotation()
             return true
@@ -714,16 +898,16 @@ final class CaptureSession: NSObject, ObservableObject {
             }
             return false
         case 123 where phase.showsActionBar:
-            nudge(direction: .left, by: nudgeStep)
+            adjustSelection(direction: .left, step: Int(nudgeStep), resizing: option)
             return true
         case 124 where phase.showsActionBar:
-            nudge(direction: .right, by: nudgeStep)
+            adjustSelection(direction: .right, step: Int(nudgeStep), resizing: option)
             return true
         case 125 where phase.showsActionBar:
-            nudge(direction: .down, by: nudgeStep)
+            adjustSelection(direction: .down, step: Int(nudgeStep), resizing: option)
             return true
         case 126 where phase.showsActionBar:
-            nudge(direction: .up, by: nudgeStep)
+            adjustSelection(direction: .up, step: Int(nudgeStep), resizing: option)
             return true
         default:
             return false

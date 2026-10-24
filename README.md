@@ -7,7 +7,7 @@
 ## 功能
 
 - 区域截屏、整屏截屏、窗口截屏
-- 选区可拖动、拖边/拖角缩放，方向键微调
+- 选区可拖动、拖边/拖角缩放；像素放大镜、1px 微调、精确输入和边缘吸附
 - 标注：矩形、箭头、画笔、文字；可选中、拖动、缩放（矩形）、删除和撤销
 - 复制、保存，或在本机识别图中文字后拷贝
 - 纵向滚动长图拼接；没滚到底时保留已拼接部分
@@ -22,6 +22,8 @@
 
 第一次截屏时，系统会请求屏幕录制权限；ScreenCutter 不再额外弹窗。若被拒绝，菜单顶部会出现「未开启屏幕录制权限」提示，点击即可打开「系统设置 → 隐私与安全性 → 屏幕录制」。如果开关已经打开仍无法截屏，先关掉再打开，然后从菜单栏完全退出 ScreenCutter 并重新打开。
 
+开发构建从本地 `Config/Signing.local.xcconfig` 读取 Apple Development 证书签名，授权可以跨重新编译保留；没有这个文件时会回退到 ad-hoc。配置方法见 [开发签名与屏幕录制授权](docs/signing.md)。
+
 ## 用法
 
 ### 截取
@@ -33,8 +35,14 @@
 ### 选区
 
 - 拖出矩形；按住 Shift 约束为正方形。按住空格再拖，可以平移当前选区
-- 松开后出现操作条：复制（Return）、保存、取消（Esc 或点压暗区域）
-- 松开后可以拖边、拖角或拖动整块选区。方向键移动 1 点，按住 Shift 移动 10 点
+- 拖动时出现放大镜：5 倍像素网格、光标所在像素为白色方块、蓝色粗十字定位，并显示显示器像素坐标和选区尺寸；松开后自动隐藏。菜单「显示选区放大镜」可以关掉
+- 边框、手柄和尺寸标签都画在选区外，不盖住被截的像素。小于 8pt 的选区不显示手柄，用键盘或「精确」调整
+- 松开后出现操作条：复制（Return）、保存、精确、取消（Esc 或点压暗区域）
+- 松开后可以拖边、拖角或拖动整块选区。方向键移动 1 像素，Shift+方向键移动 10 像素
+- Option+方向键只调右边或上边：Option+→ 加宽，Option+← 收窄，Option+↑ 向上加高，Option+↓ 从上方收窄；加 Shift 每次 10 像素
+- 「精确」打开像素输入面板：X、Y（显示器左上角起算）、W、H 都是整数像素；输入时实时预览，应用时夹紧到屏幕内，取消则回到原选区
+- 拖动和缩放会吸附到屏幕边/中线以及窗口边缘；按住 Control 暂时关闭吸附，Shift 正方形时也不吸附
+- 拖拽松手仍要求至少 4pt，避免误点产生小选区；操作条建立后可以缩到 1×1 像素
 - 取消保存对话框后，选区和操作条还在，可以改成复制
 
 ### 标注
@@ -66,8 +74,13 @@
 单元/视图测试：
 
 ```sh
-xcodebuild -project ScreenCutter.xcodeproj -scheme ScreenCutter -destination 'platform=macOS,arch=arm64' test
+xcodebuild -project ScreenCutter.xcodeproj -scheme ScreenCutter \
+  -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .build/DD4 \
+  ENABLE_DEBUG_DYLIB=NO test
 ```
+
+`ENABLE_DEBUG_DYLIB=NO` 是 Xcode 27 下 hosted test target 的绕行参数；不开时可能报重复产物或找不到 `ScreenCutter.debug.dylib`。
 
 真实环境冒烟（可选，需要辅助功能/屏幕录制权限，会操作真实鼠标键盘，默认不进 CI）：
 
@@ -84,9 +97,9 @@ E2E=1 scripts/e2e/smoke.sh
 - `App`：菜单栏入口，以及通用提示框
 - `Capture`：截屏状态、屏幕录制权限、ScreenCaptureKit 取图
 - `Export`：剪贴板和保存对话框
-- `Geometry`：像素对齐、显示器坐标、操作条位置
+- `Geometry`：显示器点/像素换算、整数像素选区、吸附候选、操作条和放大镜位置
 - `HotKey`：区域截屏快捷键的保存、注册，以及和系统符号热键、Carbon 热键的冲突判断
-- `Overlay`：每块屏幕上的遮罩、拖选和操作条
+- `Overlay`：每块屏幕上的遮罩、拖选、放大镜、操作条和精确输入
 - `Annotate`：冻结图片上的矩形、箭头、画笔和文字
 - `Recognize`：本机文字识别
 - `Scroll`：纵向滚动拼接。实现说明在 [docs/scrolling-capture.md](docs/scrolling-capture.md)
@@ -98,6 +111,8 @@ E2E=1 scripts/e2e/smoke.sh
 - [真实环境 E2E 检查](docs/e2e.md)
 - [滚动长图实现](docs/scrolling-capture.md)
 - [演进计划](docs/evolution.md)
+- [选区精准方案](docs/selection-precision.md)
+- [开发签名与屏幕录制授权](docs/signing.md)
 
 ## License
 

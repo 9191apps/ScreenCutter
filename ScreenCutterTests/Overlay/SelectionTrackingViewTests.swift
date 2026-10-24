@@ -26,6 +26,70 @@ final class SelectionTrackingViewTests: XCTestCase {
         )
     }
 
+    func testTinySelectionHasNoResizeHandles() throws {
+        let overlay = try makeOverlay()
+        let selection = ScreenSelection(
+            metrics: overlay.screen.displayMetrics,
+            pixelRect: PixelRect(x: 100, y: 100, width: 1, height: 1)
+        )
+
+        overlay.session.setPhaseForTesting(.actionBar(selection))
+
+        let chrome = try XCTUnwrap(
+            overlay.view.subviews.compactMap { $0 as? SelectionChromeView }.first
+        )
+        XCTAssertTrue(chrome.resizeHandlePoints.isEmpty)
+    }
+
+    func testCompactSelectionKeepsOnlyCornerHandles() throws {
+        let overlay = try makeOverlay()
+        let selection = ScreenSelection(
+            metrics: overlay.screen.displayMetrics,
+            pixelRect: PixelRect(x: 100, y: 100, width: 100, height: 20)
+        )
+
+        overlay.session.setPhaseForTesting(.actionBar(selection))
+
+        let chrome = try XCTUnwrap(
+            overlay.view.subviews.compactMap { $0 as? SelectionChromeView }.first
+        )
+        XCTAssertEqual(chrome.resizeHandlePoints.count, 4)
+    }
+
+    func testLoupeStaysHiddenWithoutASnapshot() throws {
+        let overlay = try makeOverlay()
+        let loupe = try XCTUnwrap(overlay.view.subviews.compactMap { $0 as? LoupeView }.first)
+        XCTAssertTrue(loupe.isHidden)
+    }
+
+    func testActionBarInstallsPrecisionButton() throws {
+        let overlay = try makeOverlay()
+        overlay.session.setPhaseForTesting(.actionBar(overlay.selection))
+
+        let titles = allButtons(in: overlay.view).map(\.title)
+        XCTAssertTrue(titles.contains("精确"))
+        XCTAssertTrue(titles.contains("复制"))
+    }
+
+
+    func testPrecisionPreviewUpdatesChromeWithoutTouchingTheActionBar() throws {
+        let overlay = try makeOverlay()
+        overlay.session.setPhaseForTesting(.actionBar(overlay.selection))
+
+        let chrome = try XCTUnwrap(
+            overlay.view.subviews.compactMap { $0 as? SelectionChromeView }.first
+        )
+        XCTAssertEqual(chrome.resizeHandlePoints.count, 8)
+
+        overlay.session.previewSelection(PixelRect(x: 10, y: 10, width: 1, height: 1))
+
+        XCTAssertTrue(chrome.resizeHandlePoints.isEmpty)
+        XCTAssertEqual(overlay.session.previewRect, PixelRect(x: 10, y: 10, width: 1, height: 1))
+
+        overlay.session.previewSelection(nil)
+        XCTAssertEqual(chrome.resizeHandlePoints.count, 8)
+    }
+
     func testSelectingPhaseHasNoResizeHandles() throws {
         let overlay = try makeOverlay()
 
@@ -532,6 +596,17 @@ final class SelectionTrackingViewTests: XCTestCase {
         }
         XCTAssertEqual(start, CGPoint(x: 540, y: 380))
         XCTAssertEqual(end, CGPoint(x: 740, y: 280))
+    }
+
+    private func allButtons(in view: NSView) -> [NSButton] {
+        var buttons: [NSButton] = []
+        if let button = view as? NSButton {
+            buttons.append(button)
+        }
+        for subview in view.subviews {
+            buttons.append(contentsOf: allButtons(in: subview))
+        }
+        return buttons
     }
 
     private func selectionViewRect(_ selection: ScreenSelection, screen: NSScreen) -> CGRect {

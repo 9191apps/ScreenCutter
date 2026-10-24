@@ -1,27 +1,19 @@
 import CoreGraphics
 import Foundation
 
-nonisolated struct PixelSize: Equatable, Sendable {
-    var width: Int
-    var height: Int
-}
-
 /// Selection math in two coordinate spaces.
 /// Global rects use AppKit points with the origin at the bottom left.
 /// Display-local rects use the top-left origin ScreenCaptureKit expects.
+/// Pixel quantization lives in `DisplayMetrics` and `PixelRect`; this type covers
+/// the point-space interactions that do not need the framebuffer size.
 nonisolated enum SelectionGeometry {
     static let actionBarSize = CGSize(width: 360, height: 44)
     static let actionBarMargin: CGFloat = 8
+    /// Release threshold for a drag, in points. Keeps a stray click from becoming
+    /// a tiny selection.
     static let minimumSelection: CGFloat = 4
-
-    static func pixelAligned(_ rect: CGRect, scale: CGFloat) -> CGRect {
-        guard scale > 0, !rect.isNull, !rect.isInfinite else { return rect }
-        let minX = (rect.minX * scale).rounded() / scale
-        let minY = (rect.minY * scale).rounded() / scale
-        let maxX = (rect.maxX * scale).rounded() / scale
-        let maxY = (rect.maxY * scale).rounded() / scale
-        return CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
-    }
+    /// Adjustable selections can go down to a single pixel.
+    static let minimumSelectionPixels = 1
 
     static func displayLocalRect(selection: CGRect, screenFrame: CGRect) -> CGRect {
         CGRect(
@@ -32,52 +24,8 @@ nonisolated enum SelectionGeometry {
         )
     }
 
-    static func pixelScale(pixelWidth: CGFloat, pointWidth: CGFloat, fallback: CGFloat) -> CGFloat {
-        guard pointWidth > 0, pixelWidth > 0 else { return fallback > 0 ? fallback : 1 }
-        return pixelWidth / pointWidth
-    }
-
-    static func outputPixelSize(of rect: CGRect, scale: CGFloat) -> PixelSize {
-        let safeScale = scale > 0 ? scale : 1
-        return PixelSize(
-            width: Int((rect.width * safeScale).rounded()),
-            height: Int((rect.height * safeScale).rounded())
-        )
-    }
-
-    /// Integer pixel rect inside a full-display capture. Cropping copies those pixels.
-    /// A partial ScreenCaptureKit `sourceRect` is scaled into the output and softens text.
-    static func pixelCrop(
-        globalRect: CGRect,
-        screenFrame: CGRect,
-        imageWidth: Int,
-        imageHeight: Int
-    ) -> CGRect {
-        guard imageWidth > 0, imageHeight > 0, screenFrame.width > 0, screenFrame.height > 0,
-              !globalRect.isNull, !globalRect.isInfinite else {
-            return .zero
-        }
-        let scaleX = CGFloat(imageWidth) / screenFrame.width
-        let scaleY = CGFloat(imageHeight) / screenFrame.height
-        let minX = (globalRect.minX * scaleX).rounded()
-        let maxX = (globalRect.maxX * scaleX).rounded()
-        let minY = (globalRect.minY * scaleY).rounded()
-        let maxY = (globalRect.maxY * scaleY).rounded()
-        let crop = CGRect(
-            x: minX - screenFrame.minX * scaleX,
-            y: screenFrame.maxY * scaleY - maxY,
-            width: max(0, maxX - minX),
-            height: max(0, maxY - minY)
-        ).integral
-        let bounds = CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
-        let clipped = crop.intersection(bounds)
-        guard !clipped.isNull, clipped.width >= 1, clipped.height >= 1 else { return .zero }
-        return clipped
-    }
-
-    static func pixelSizeLabel(globalRect: CGRect, scale: CGFloat) -> String {
-        let pixels = outputPixelSize(of: globalRect, scale: scale)
-        return "\(pixels.width) × \(pixels.height)"
+    static func pixelSizeLabel(pixelRect: PixelRect) -> String {
+        "\(pixelRect.width) × \(pixelRect.height)"
     }
 
     /// Places the bar just outside the selection, aligned to its trailing edge.
@@ -134,6 +82,10 @@ nonisolated enum SelectionGeometry {
 
     static func isSubstantial(_ rect: CGRect, minimum: CGFloat = minimumSelection) -> Bool {
         rect.width >= minimum && rect.height >= minimum
+    }
+
+    static func isSubstantial(_ rect: PixelRect) -> Bool {
+        rect.width >= minimumSelectionPixels && rect.height >= minimumSelectionPixels
     }
 
     /// Handles use the same coordinate space as `rect`. In AppKit global space, `maxY` is the visual top.

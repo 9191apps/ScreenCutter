@@ -39,6 +39,10 @@ private struct CaptureMenu: View {
             Button(detail) {}
                 .disabled(true)
         }
+        Toggle("显示选区放大镜", isOn: Binding(
+            get: { session.showLoupe },
+            set: { session.setShowLoupe($0) }
+        ))
         Button("拷贝文字") {
             session.copyRecognizedText()
         }

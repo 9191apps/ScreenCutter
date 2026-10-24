@@ -1,10 +1,10 @@
 import AppKit
 import Combine
 
-final class SelectionTrackingView: NSView {
+final class SelectionTrackingView: NSView, NSPopoverDelegate {
     let session: CaptureSession
     let screenFrame: CGRect
-    let scale: CGFloat
+    let metrics: DisplayMetrics
     let displayID: CGDirectDisplayID
     private let dim = DimMaskView(frame: .zero)
     private let chrome = SelectionChromeView(frame: .zero)
@@ -12,9 +12,12 @@ final class SelectionTrackingView: NSView {
     private let annotateButton = NSButton(title: "标注", target: nil, action: nil)
     private let scrollButton = NSButton(title: "开始滚动", target: nil, action: nil)
     private let copyButton = NSButton(title: "复制", target: nil, action: nil)
+    private let precisionButton = NSButton(title: "精确", target: nil, action: nil)
     private var annotationCanvas: AnnotationCanvasView?
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    private let loupe = LoupeView()
+    private var precisionPopover: NSPopover?
     private var observations: [AnyCancellable] = []
     private var trackingArea: NSTrackingArea?
     /// The phase this overlay last laid out for.
@@ -26,14 +29,22 @@ final class SelectionTrackingView: NSView {
     /// below do not dispatch mouse-moved events, so the cursor has to be set
     /// explicitly when a drag starts.
     private var dragCursor: CursorIntent?
+    // `@Published` emits during `willSet`; these mirror the last published values
+    // so layout never reads the previous state off `session`.
+    private var laidOutPreview: PixelRect?
+    private var laidOutShowLoupe = true
+    private var laidOutScrollIntent = false
 
     init(session: CaptureSession, screen: NSScreen) {
         self.session = session
         screenFrame = screen.frame
-        scale = screen.backingScaleFactor
+        metrics = screen.displayMetrics
         displayID = screen.displayID
         super.init(frame: NSRect(origin: .zero, size: screen.frame.size))
         laidOutPhase = session.phase
+        laidOutPreview = session.previewRect
+        laidOutShowLoupe = session.showLoupe
+        laidOutScrollIntent = session.scrollIntent
         dim.frame = bounds
         dim.autoresizingMask = [.width, .height]
         chrome.frame = bounds
@@ -48,12 +59,25 @@ final class SelectionTrackingView: NSView {
         addSubview(canvas)
         canvas.attachToolbar(to: self)
         annotationCanvas = canvas
+        addSubview(loupe)
         observations = [
             session.$phase.sink { [weak self] next in
                 self?.apply(phase: next)
             },
-            session.$scrollIntent.sink { [weak self] _ in
+            session.$scrollIntent.sink { [weak self] scrolling in
+                self?.laidOutScrollIntent = scrolling
                 self?.layoutActionBar()
+            },
+            session.$snapshotVersion.sink { [weak self] _ in
+                self?.refreshLoupeAtMouse()
+            },
+            session.$showLoupe.sink { [weak self] showLoupe in
+                self?.laidOutShowLoupe = showLoupe
+                self?.refreshLoupeAtMouse()
+            },
+            session.$previewRect.sink { [weak self] preview in
+                self?.laidOutPreview = preview
+                self?.layoutDim()
             },
         ]
         NotificationCenter.default.addObserver(
@@ -132,20 +156,29 @@ final class SelectionTrackingView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        updateCursor(at: convert(event.locationInWindow, from: nil))
+        let local = convert(event.locationInWindow, from: nil)
+        updateCursor(at: local)
+        if session.phase.isSelecting {
+            session.ensureSnapshot(displayID: displayID)
+        }
+        refreshLoupe(global: globalPoint(from: event))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hideLoupe()
     }
 
     override func mouseMoved(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
+        let global = globalPoint(from: event)
         if session.phase.isPickingWindow {
-            session.updateWindowHover(
-                at: globalPoint(from: event),
-                screenID: displayID,
-                screenFrame: screenFrame,
-                scale: scale
-            )
+            session.updateWindowHover(at: global, metrics: metrics)
+        }
+        if session.phase.isSelecting {
+            session.ensureSnapshot(displayID: displayID)
         }
         updateCursor(at: local)
+        refreshLoupe(global: global)
     }
 
     /// Reapplies the cursor for the current mouse location. Used after phase
@@ -214,13 +247,11 @@ final class SelectionTrackingView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if session.phase.isSelecting {
+            session.refreshSnapshotIfStale(displayID: displayID)
+        }
         if session.phase.isPickingWindow {
-            session.confirmWindow(
-                at: globalPoint(from: event),
-                screenID: displayID,
-                screenFrame: screenFrame,
-                scale: scale
-            )
+            session.confirmWindow(at: globalPoint(from: event), metrics: metrics)
             layoutActionBar()
             return
         }
@@ -240,6 +271,7 @@ final class SelectionTrackingView: NSView {
             return
         }
         guard session.phase.isSelecting else { return }
+        session.ensureSnapshot(displayID: displayID)
         trackDrag(from: event)
     }
 
@@ -248,11 +280,21 @@ final class SelectionTrackingView: NSView {
             dragCursor = nil
             refreshCursor()
         }
-        var anchor = globalPoint(from: event)
+        var anchor = session.snappedPoint(
+            globalPoint(from: event),
+            metrics: metrics,
+            enabled: !event.modifierFlags.contains(.control)
+        )
         var current = anchor
         var lastMouse = anchor
         var spaceMove: (anchor: CGPoint, current: CGPoint, mouse: CGPoint)?
-        publish(anchor: anchor, current: current, flags: event.modifierFlags)
+        publish(
+            anchor: anchor,
+            current: current,
+            flags: event.modifierFlags,
+            snapEnabled: !event.modifierFlags.contains(.control)
+        )
+        refreshLoupe(global: anchor)
         let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp, .keyDown, .keyUp]
         while true {
             guard session.phase.isSelecting else { return }
@@ -292,10 +334,18 @@ final class SelectionTrackingView: NSView {
             } else {
                 current = lastMouse
             }
-            publish(anchor: anchor, current: current, flags: next.modifierFlags, constrainSquare: spaceMove == nil)
+            publish(
+                anchor: anchor,
+                current: current,
+                flags: next.modifierFlags,
+                snapEnabled: spaceMove == nil && !next.modifierFlags.contains(.control),
+                constrainSquare: spaceMove == nil
+            )
+            refreshLoupe(global: current)
             if next.type == .leftMouseUp {
                 session.endDrag(screenID: displayID)
                 layoutActionBar()
+                refreshLoupe(global: current)
                 return
             }
         }
@@ -326,10 +376,15 @@ final class SelectionTrackingView: NSView {
                 continue
             }
             lastMouse = globalPoint(from: current)
-            session.updateAdjustment(to: lastMouse)
+            session.updateAdjustment(
+                to: lastMouse,
+                snapEnabled: !current.modifierFlags.contains(.control)
+            )
+            refreshLoupe(global: lastMouse)
             if current.type == .leftMouseUp {
                 session.endAdjustment()
                 layoutActionBar()
+                refreshLoupe(global: lastMouse)
                 return
             }
         }
@@ -339,15 +394,15 @@ final class SelectionTrackingView: NSView {
         anchor: CGPoint,
         current: CGPoint,
         flags: NSEvent.ModifierFlags,
+        snapEnabled: Bool,
         constrainSquare: Bool = true
     ) {
         session.updateDrag(
-            screenID: displayID,
-            screenFrame: screenFrame,
-            scale: scale,
+            metrics: metrics,
             anchor: anchor,
             current: current,
-            constrainSquare: constrainSquare && flags.contains(.shift)
+            constrainSquare: constrainSquare && flags.contains(.shift),
+            snapEnabled: snapEnabled
         )
     }
 
@@ -369,7 +424,7 @@ final class SelectionTrackingView: NSView {
         barContainer.frame = NSRect(origin: .zero, size: SelectionGeometry.actionBarSize)
         addSubview(barContainer)
 
-        let buttons = [scrollButton, annotateButton, copyButton, saveButton, cancelButton]
+        let buttons = [scrollButton, annotateButton, copyButton, saveButton, precisionButton, cancelButton]
         for button in buttons {
             button.target = self
             button.bezelStyle = .rounded
@@ -382,6 +437,7 @@ final class SelectionTrackingView: NSView {
         copyButton.action = #selector(copyClicked)
         copyButton.bezelColor = .controlAccentColor
         saveButton.action = #selector(saveClicked)
+        precisionButton.action = #selector(precisionClicked)
         cancelButton.action = #selector(cancelClicked)
 
         let stack = NSStackView(views: buttons)
@@ -402,20 +458,33 @@ final class SelectionTrackingView: NSView {
 
     private func apply(phase next: CapturePhase) {
         laidOutPhase = next
+        if !next.showsActionBar {
+            laidOutPreview = nil
+            closePrecisionPopover()
+        }
         layoutDim()
         layoutActionBar()
         layoutAnnotationCanvas()
         window?.invalidateCursorRects(for: self)
         refreshCursor()
+        refreshLoupeAtMouse()
+    }
+
+    private struct DisplaySelection {
+        var metrics: DisplayMetrics
+        var pixelRect: PixelRect
+        var label: String
+        var showsHandles: Bool
     }
 
     private func layoutDim() {
-        guard let current = currentSelection() else {
+        guard let current = previewSelection() ?? currentSelection() else {
             dim.setHole(nil)
             chrome.update(rect: .zero, label: "", handles: [])
             return
         }
-        let local = SelectionGeometry.displayLocalRect(selection: current.global, screenFrame: screenFrame)
+        let global = current.metrics.globalRect(for: current.pixelRect)
+        let local = SelectionGeometry.displayLocalRect(selection: global, screenFrame: screenFrame)
         guard local.width > 0, local.height > 0 else {
             dim.setHole(nil)
             chrome.update(rect: .zero, label: "", handles: [])
@@ -423,33 +492,69 @@ final class SelectionTrackingView: NSView {
         }
         dim.setHole(local)
         let appKit = CGRect(
-            x: current.global.minX - screenFrame.minX,
-            y: current.global.minY - screenFrame.minY,
-            width: current.global.width,
-            height: current.global.height
+            x: global.minX - screenFrame.minX,
+            y: global.minY - screenFrame.minY,
+            width: global.width,
+            height: global.height
         )
         let handles = current.showsHandles
-            ? SelectionGeometry.handleAnchors(in: current.global).map {
+            ? SelectionGeometry.handleAnchors(in: global).map {
                 CGPoint(x: $0.1.x - screenFrame.minX, y: $0.1.y - screenFrame.minY)
             }
             : []
-        chrome.update(rect: appKit, label: current.label, handles: handles)
+        chrome.update(
+            rect: appKit,
+            label: current.label,
+            handles: handles
+        )
     }
 
-    private func currentSelection() -> (global: CGRect, label: String, showsHandles: Bool)? {
+    private func previewSelection() -> DisplaySelection? {
+        guard let preview = laidOutPreview,
+              case .actionBar(let selection) = laidOutPhase,
+              selection.screenID == displayID else { return nil }
+        return DisplaySelection(
+            metrics: selection.metrics,
+            pixelRect: preview,
+            label: SelectionGeometry.pixelSizeLabel(pixelRect: preview),
+            showsHandles: false
+        )
+    }
+
+    private func currentSelection() -> DisplaySelection? {
         switch laidOutPhase {
         case .selecting(let drag?):
             guard drag.screenID == displayID else { return nil }
-            return (drag.globalRect, SelectionGeometry.pixelSizeLabel(globalRect: drag.globalRect, scale: drag.scale), false)
+            return DisplaySelection(
+                metrics: drag.metrics,
+                pixelRect: drag.pixelRect,
+                label: SelectionGeometry.pixelSizeLabel(pixelRect: drag.pixelRect),
+                showsHandles: false
+            )
         case .actionBar(let selection):
             guard selection.screenID == displayID else { return nil }
-            return (selection.globalRect, SelectionGeometry.pixelSizeLabel(globalRect: selection.globalRect, scale: selection.scale), true)
+            return DisplaySelection(
+                metrics: selection.metrics,
+                pixelRect: selection.pixelRect,
+                label: SelectionGeometry.pixelSizeLabel(pixelRect: selection.pixelRect),
+                showsHandles: true
+            )
         case .editing(let selection), .working(let selection):
             guard selection.screenID == displayID else { return nil }
-            return (selection.globalRect, SelectionGeometry.pixelSizeLabel(globalRect: selection.globalRect, scale: selection.scale), false)
+            return DisplaySelection(
+                metrics: selection.metrics,
+                pixelRect: selection.pixelRect,
+                label: SelectionGeometry.pixelSizeLabel(pixelRect: selection.pixelRect),
+                showsHandles: false
+            )
         case .windowPicking(let hover?):
             guard hover.screenID == displayID else { return nil }
-            return (hover.globalRect, hover.title, false)
+            return DisplaySelection(
+                metrics: hover.metrics,
+                pixelRect: hover.pixelRect,
+                label: hover.title,
+                showsHandles: false
+            )
         default:
             return nil
         }
@@ -460,6 +565,8 @@ final class SelectionTrackingView: NSView {
               case .actionBar(let selection) = laidOutPhase,
               selection.screenID == displayID else {
             barContainer.isHidden = true
+            closePrecisionPopover()
+            refreshLoupeAtMouse()
             return
         }
         let local = SelectionGeometry.displayLocalRect(
@@ -472,11 +579,12 @@ final class SelectionTrackingView: NSView {
             barSize: SelectionGeometry.actionBarSize,
             margin: SelectionGeometry.actionBarMargin
         )
-        let scrolling = session.scrollIntent
+        let scrolling = laidOutScrollIntent
         scrollButton.isHidden = !scrolling
         annotateButton.isHidden = scrolling
         copyButton.isHidden = scrolling
         saveButton.isHidden = scrolling
+        precisionButton.isHidden = false
         barContainer.isHidden = false
         barContainer.frame = NSRect(
             x: frame.minX,
@@ -484,6 +592,104 @@ final class SelectionTrackingView: NSView {
             width: frame.width,
             height: frame.height
         )
+        refreshLoupeAtMouse()
+    }
+
+    private func refreshLoupeAtMouse() {
+        guard let window, window.isVisible else {
+            hideLoupe()
+            return
+        }
+        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard bounds.contains(local) else {
+            hideLoupe()
+            return
+        }
+        updateLoupe(atLocal: local)
+    }
+
+    private func refreshLoupe(global: CGPoint) {
+        updateLoupe(atLocal: CGPoint(x: global.x - screenFrame.minX, y: global.y - screenFrame.minY))
+    }
+
+    private func updateLoupe(atLocal local: CGPoint) {
+        // The loupe is a drawing aid for the initial drag. Once the selection
+        // exists the border, handles, and precision fields are enough.
+        guard laidOutShowLoupe,
+              laidOutPhase.isSelecting,
+              precisionPopover?.isShown != true,
+              let image = session.snapshot(for: displayID) else {
+            hideLoupe()
+            return
+        }
+        if !barContainer.isHidden, barContainer.frame.contains(local) {
+            hideLoupe()
+            return
+        }
+        let global = CGPoint(x: screenFrame.minX + local.x, y: screenFrame.minY + local.y)
+        let pixel = metrics.pixelPoint(for: global)
+        loupe.update(
+            source: image,
+            focus: pixel,
+            selection: currentSelection()?.pixelRect,
+            sourcePixelSize: metrics.pixelSize
+        )
+        var loupeFrame = LoupeGeometry.frame(
+            cursor: local,
+            size: LoupeView.contentSize,
+            bounds: bounds
+        )
+        // The loupe follows the mouse at fractional points. Landing on half a
+        // device pixel blurs the 1px grid and the magnified pixels, so snap the
+        // frame to the backing store before showing it.
+        if let scale = window?.backingScaleFactor {
+            loupeFrame = LoupeGeometry.alignedToBackingStore(loupeFrame, scale: scale)
+        }
+        loupe.frame = loupeFrame
+        loupe.isHidden = false
+    }
+
+    private func hideLoupe() {
+        loupe.isHidden = true
+    }
+
+    private func closePrecisionPopover() {
+        precisionPopover?.close()
+        precisionPopover = nil
+    }
+
+    @objc private func precisionClicked() {
+        guard case .actionBar(let selection) = session.phase else { return }
+        closePrecisionPopover()
+        let controller = PrecisionFieldsViewController(metrics: selection.metrics, rect: selection.pixelRect)
+        controller.onPreview = { [weak self] rect in
+            self?.session.previewSelection(rect)
+        }
+        controller.onApply = { [weak self] rect in
+            self?.session.previewSelection(nil)
+            self?.session.setSelection(pixelRect: rect)
+            self?.closePrecisionPopover()
+            self?.refreshLoupeAtMouse()
+        }
+        controller.onCancel = { [weak self] in
+            self?.session.previewSelection(nil)
+            self?.closePrecisionPopover()
+        }
+        let popover = NSPopover()
+        popover.contentViewController = controller
+        popover.behavior = .semitransient
+        popover.animates = false
+        popover.delegate = self
+        precisionPopover = popover
+        hideLoupe()
+        popover.show(relativeTo: precisionButton.bounds, of: precisionButton, preferredEdge: .maxY)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        session.previewSelection(nil)
+        if (notification.object as? NSPopover) === precisionPopover {
+            precisionPopover = nil
+        }
     }
 
     private func layoutAnnotationCanvas() {
@@ -500,6 +706,8 @@ final class SelectionTrackingView: NSView {
         canvas.needsDisplay = true
         canvas.isHidden = false
         barContainer.isHidden = true
+        closePrecisionPopover()
+        hideLoupe()
     }
 
     @objc private func scrollClicked() {
@@ -519,6 +727,8 @@ final class SelectionTrackingView: NSView {
     }
 
     @objc private func cancelClicked() {
+        closePrecisionPopover()
+        hideLoupe()
         session.cancel()
     }
 }

@@ -18,20 +18,42 @@ final class SelectionGeometryTests: XCTestCase {
         XCTAssertEqual(output.crop, CGRect(x: 20, y: 1741, width: 30, height: 18))
     }
 
-    func testPixelCropOnScreenLeftOfPrimary() {
-        let crop = SelectionGeometry.pixelCrop(
-            globalRect: CGRect(x: -1000, y: 100, width: 400, height: 200),
-            screenFrame: CGRect(x: -1920, y: 0, width: 1920, height: 1080),
-            imageWidth: 1920,
-            imageHeight: 1080
+    func testOnePixelSelectionProducesAOnePixelCrop() {
+        let metrics = DisplayMetrics(
+            screenID: 1,
+            pointFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            pixelSize: CGSize(width: 2880, height: 1800)
         )
-        XCTAssertEqual(crop, CGRect(x: 920, y: 780, width: 400, height: 200))
+        let selection = ScreenSelection(
+            metrics: metrics,
+            pixelRect: PixelRect(x: 10, y: 20, width: 1, height: 1)
+        )
+        let output = ScreenCaptureService.output(for: selection, pixelWidth: 2880, pixelHeight: 1800)
+        XCTAssertEqual(output.crop, CGRect(x: 10, y: 20, width: 1, height: 1))
     }
 
-    func testPixelAlignsEdgesToRetinaPixels() {
-        let rect = CGRect(x: 10, y: 20.3, width: 15.2, height: 9.1)
-        let aligned = SelectionGeometry.pixelAligned(rect, scale: 2)
-        XCTAssertEqual(aligned, CGRect(x: 10, y: 20.5, width: 15, height: 9))
+    func testPixelRectOnScreenLeftOfPrimary() {
+        let metrics = DisplayMetrics(
+            screenID: 2,
+            pointFrame: CGRect(x: -1920, y: 0, width: 1920, height: 1080),
+            pixelSize: CGSize(width: 1920, height: 1080)
+        )
+        let rect = metrics.pixelRect(for: CGRect(x: -1000, y: 100, width: 400, height: 200))
+        XCTAssertEqual(rect, PixelRect(x: 920, y: 780, width: 400, height: 200))
+    }
+
+    func testPixelRectAlignsEdgesToRetinaPixels() {
+        let metrics = DisplayMetrics(
+            screenID: 1,
+            pointFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            pixelSize: CGSize(width: 2880, height: 1800)
+        )
+        let rect = metrics.pixelRect(for: CGRect(x: 10, y: 20.3, width: 15.2, height: 9.1))
+        XCTAssertEqual(rect, PixelRect(x: 20, y: 1741, width: 30, height: 18))
+        XCTAssertEqual(
+            metrics.globalRect(for: rect),
+            CGRect(x: 10, y: 20.5, width: 15, height: 9)
+        )
     }
 
     func testDisplayLocalRectOnRetinaPrimaryScreen() {
@@ -42,10 +64,8 @@ final class SelectionGeometryTests: XCTestCase {
             SelectionGeometry.displayLocalRect(selection: selection, screenFrame: screen),
             CGRect(x: 100, y: 550, width: 300, height: 150)
         )
-        XCTAssertEqual(
-            SelectionGeometry.outputPixelSize(of: selection, scale: 2),
-            PixelSize(width: 600, height: 300)
-        )
+        let metrics = DisplayMetrics(screenID: 1, pointFrame: screen, pixelSize: CGSize(width: 2880, height: 1800))
+        XCTAssertEqual(metrics.pixelRect(for: selection), PixelRect(x: 200, y: 1100, width: 600, height: 300))
     }
 
     func testDisplayLocalRectOn1xScreenLeftOfPrimary() {
@@ -56,10 +76,8 @@ final class SelectionGeometryTests: XCTestCase {
             SelectionGeometry.displayLocalRect(selection: selection, screenFrame: screen),
             CGRect(x: 920, y: 780, width: 400, height: 200)
         )
-        XCTAssertEqual(
-            SelectionGeometry.outputPixelSize(of: selection, scale: 1),
-            PixelSize(width: 400, height: 200)
-        )
+        let metrics = DisplayMetrics(screenID: 2, pointFrame: screen, pixelSize: CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(metrics.pixelRect(for: selection), PixelRect(x: 920, y: 780, width: 400, height: 200))
     }
 
     func testDisplayLocalRectOnScreenAbovePrimary() {

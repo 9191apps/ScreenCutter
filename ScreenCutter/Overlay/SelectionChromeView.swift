@@ -1,6 +1,10 @@
 import AppKit
 
-/// Selection border, size label, and resize handles. Drawn above the dim so it can refresh without rebuilding the mask.
+/// Selection border, size label, and resize handles. Drawn above the dim so it can
+/// refresh without rebuilding the mask.
+///
+/// The border and handles live just outside `selectionRect`, so the pixels being
+/// captured are never covered by the chrome.
 final class SelectionChromeView: NSView {
     private var selectionRect: CGRect = .zero
     private var label = ""
@@ -25,26 +29,68 @@ final class SelectionChromeView: NSView {
     func update(rect: CGRect, label: String, handles: [CGPoint]) {
         selectionRect = rect
         self.label = label
-        handlePoints = handles
+        handlePoints = visibleHandles(in: rect, from: handles)
         needsDisplay = true
     }
 
     /// Resize knobs currently drawn, in this view's coordinates.
     var resizeHandlePoints: [CGPoint] { handlePoints }
 
+    private func visibleHandles(in rect: CGRect, from points: [CGPoint]) -> [CGPoint] {
+        guard rect.width >= 8, rect.height >= 8 else { return [] }
+        guard rect.width < 24 || rect.height < 24 else { return points }
+        return points.filter { point in
+            let onLeft = abs(point.x - rect.minX) < 0.75
+            let onRight = abs(point.x - rect.maxX) < 0.75
+            let onTop = abs(point.y - rect.maxY) < 0.75
+            let onBottom = abs(point.y - rect.minY) < 0.75
+            return (onLeft || onRight) && (onTop || onBottom)
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard selectionRect.width > 0, selectionRect.height > 0 else { return }
-        NSColor.black.setStroke()
-        let border = NSBezierPath(rect: selectionRect)
-        border.lineWidth = 3
+        drawBorder()
+        drawHandles()
+        drawLabel()
+    }
+
+    private func drawBorder() {
+        let compact = min(selectionRect.width, selectionRect.height) < 24
+        let offset: CGFloat = compact ? 1 : 1.5
+        let blackWidth: CGFloat = compact ? 2 : 3
+        let borderRect = selectionRect.insetBy(dx: -offset, dy: -offset)
+
+        NSColor.black.withAlphaComponent(0.9).setStroke()
+        let border = NSBezierPath(rect: borderRect)
+        border.lineWidth = blackWidth
         border.stroke()
+
         NSColor.white.setStroke()
-        let hairline = NSBezierPath(rect: selectionRect)
+        let hairline = NSBezierPath(rect: borderRect)
         hairline.lineWidth = 1
         hairline.stroke()
+    }
 
+    private func drawHandles() {
+        guard !handlePoints.isEmpty else { return }
+        let size: CGFloat = min(selectionRect.width, selectionRect.height) < 24 ? 6 : 8
+        let offset = size / 2
         for point in handlePoints {
-            let handle = NSRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
+            let onLeft = abs(point.x - selectionRect.minX) < 0.75
+            let onRight = abs(point.x - selectionRect.maxX) < 0.75
+            let onTop = abs(point.y - selectionRect.maxY) < 0.75
+            let onBottom = abs(point.y - selectionRect.minY) < 0.75
+            let center = CGPoint(
+                x: point.x + (onLeft ? -offset : (onRight ? offset : 0)),
+                y: point.y + (onBottom ? -offset : (onTop ? offset : 0))
+            )
+            let handle = NSRect(
+                x: center.x - size / 2,
+                y: center.y - size / 2,
+                width: size,
+                height: size
+            )
             NSColor.white.setFill()
             NSBezierPath(rect: handle).fill()
             NSColor.black.setStroke()
@@ -52,8 +98,6 @@ final class SelectionChromeView: NSView {
             outline.lineWidth = 1
             outline.stroke()
         }
-
-        drawLabel()
     }
 
     private func drawLabel() {
