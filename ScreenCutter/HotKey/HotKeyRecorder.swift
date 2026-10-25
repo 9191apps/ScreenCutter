@@ -1,9 +1,21 @@
 import AppKit
 
 enum HotKeyRecorder {
-    static func capture() -> HotKeyChord? {
-        let panel = HotKeyCaptureWindow()
+    /// Shows a modal recorder. `suspend` runs before the panel appears so the
+    /// key press being recorded cannot trigger an existing global hot key;
+    /// `resume` always runs afterwards.
+    static func capture(
+        title: String = "更改快捷键",
+        suspend: () -> Void = {},
+        resume: () -> Void = {}
+    ) -> HotKeyChord? {
+        suspend()
+        defer { resume() }
+        let panel = HotKeyCaptureWindow(title: title)
         let previous = NSApp.activationPolicy()
+        // The recorder may be opened from the Settings window. Remember it so
+        // closing the modal returns the user to where they started.
+        let previousKeyWindow = NSApp.keyWindow
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         panel.center()
@@ -11,6 +23,10 @@ enum HotKeyRecorder {
         NSApp.runModal(for: panel)
         panel.orderOut(nil)
         NSApp.setActivationPolicy(previous)
+        if let previousKeyWindow {
+            previousKeyWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
         return panel.chord
     }
 }
@@ -18,14 +34,14 @@ enum HotKeyRecorder {
 private final class HotKeyCaptureWindow: NSWindow {
     var chord: HotKeyChord?
 
-    init() {
+    init(title: String) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 88),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
-        title = "更改快捷键"
+        self.title = title
         let label = NSTextField(wrappingLabelWithString: "按下新的快捷键。需要包含 ⌘、⌥ 或 ⌃。Esc 取消。")
         label.frame = NSRect(x: 16, y: 16, width: 288, height: 56)
         contentView = label

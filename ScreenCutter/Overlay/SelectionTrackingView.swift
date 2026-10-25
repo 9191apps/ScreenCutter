@@ -59,6 +59,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         addSubview(canvas)
         canvas.attachToolbar(to: self)
         annotationCanvas = canvas
+        loupe.setPreset(session.loupePreset)
         addSubview(loupe)
         observations = [
             session.$phase.sink { [weak self] next in
@@ -73,6 +74,10 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             },
             session.$showLoupe.sink { [weak self] showLoupe in
                 self?.laidOutShowLoupe = showLoupe
+                self?.refreshLoupeAtMouse()
+            },
+            session.$loupePreset.sink { [weak self] preset in
+                self?.loupe.setPreset(preset)
                 self?.refreshLoupeAtMouse()
             },
             session.$previewRect.sink { [weak self] preview in
@@ -636,7 +641,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         )
         var loupeFrame = LoupeGeometry.frame(
             cursor: local,
-            size: LoupeView.contentSize,
+            size: loupe.contentSize,
             bounds: bounds
         )
         // The loupe follows the mouse at fractional points. Landing on half a

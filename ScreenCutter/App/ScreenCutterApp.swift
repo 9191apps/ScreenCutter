@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 
 @main
@@ -10,11 +9,17 @@ struct ScreenCutterApp: App {
         MenuBarExtra("ScreenCutter", systemImage: "crop") {
             CaptureMenu(session: session)
         }
+
+        Settings {
+            SettingsView(session: session)
+        }
     }
 }
 
 private struct CaptureMenu: View {
     @ObservedObject var session: CaptureSession
+    @Environment(\.openSettings) private var openSettings
+    @AppStorage(SettingsTab.defaultsKey) private var selectedSettingsTab = SettingsTab.general.rawValue
 
     var body: some View {
         if !session.hasScreenRecordingAccess {
@@ -24,100 +29,67 @@ private struct CaptureMenu: View {
             Divider()
         }
 
+        if let problem = session.activeHotKeyConflict,
+           let detail = problem.conflict.menuDetail(for: problem.chord) {
+            Button("\(detail)，点此打开设置…") {
+                showSettings(.shortcuts)
+            }
+            Divider()
+        }
+
         Button("截取区域") {
             session.begin()
         }
-        .modifier(CaptureMenuShortcut(
-            isEnabled: session.hotKeyConflict == .none && session.regionChord == .regionCapture
-        ))
-
-        if session.hotKeyConflict == .none, session.regionChord != .regionCapture {
-            Button(session.regionChord.display) {}
-                .disabled(true)
-        }
-        if let detail = session.hotKeyConflict.menuDetail(for: session.regionChord) {
-            Button(detail) {}
-                .disabled(true)
-        }
-        Toggle("显示选区放大镜", isOn: Binding(
-            get: { session.showLoupe },
-            set: { session.setShowLoupe($0) }
-        ))
-        Button("拷贝文字") {
-            session.copyRecognizedText()
-        }
-        .disabled(!session.phase.isEditing)
-
-        Button("更改快捷键") {
-            session.beginHotKeyChange()
-        }
-
-        Divider()
+        .hotKeyMenuShortcut(session.hotKeyConflict == .none ? session.regionChord : nil)
 
         Button("截取整屏") {
             session.captureFullScreen()
         }
-        hotKeyStatus(
-            enabled: session.fullScreenHotKeyEnabled,
-            chord: .fullScreen,
-            conflict: session.fullScreenConflict,
-            title: "整屏快捷键"
+        .hotKeyMenuShortcut(
+            session.fullScreenHotKeyEnabled && session.fullScreenConflict == .none
+                ? session.fullScreenChord
+                : nil
         )
-        Toggle("使用整屏快捷键", isOn: Binding(
-            get: { session.fullScreenHotKeyEnabled },
-            set: { session.setFullScreenHotKeyEnabled($0) }
-        ))
+
+        Button("截取窗口") {
+            session.beginWindowCapture()
+        }
+        .hotKeyMenuShortcut(
+            session.windowHotKeyEnabled && session.windowConflict == .none
+                ? session.windowChord
+                : nil
+        )
 
         Button("滚动长图") {
             session.beginScrollCapture()
         }
 
-        Button("截取窗口") {
-            session.beginWindowCapture()
+        if session.phase.isEditing {
+            Divider()
+            Button("拷贝文字") {
+                session.copyRecognizedText()
+            }
         }
-        hotKeyStatus(
-            enabled: session.windowHotKeyEnabled,
-            chord: .window,
-            conflict: session.windowConflict,
-            title: "窗口快捷键"
-        )
-        Toggle("使用窗口快捷键", isOn: Binding(
-            get: { session.windowHotKeyEnabled },
-            set: { session.setWindowHotKeyEnabled($0) }
-        ))
 
         Divider()
+
+        Button("设置…") {
+            showSettings()
+        }
+        .keyboardShortcut(",", modifiers: .command)
 
         Button("退出") {
             NSApplication.shared.terminate(nil)
         }
+        .keyboardShortcut("q", modifiers: .command)
     }
-}
 
-@ViewBuilder
-private func hotKeyStatus(
-    enabled: Bool,
-    chord: HotKeyChord,
-    conflict: HotKeyConflict,
-    title: String
-) -> some View {
-    if enabled, let detail = conflict.menuDetail(for: chord) {
-        Button(detail) {}
-            .disabled(true)
-    } else if enabled, conflict == .none {
-        Button("\(title) \(chord.display)") {}
-            .disabled(true)
-    }
-}
-
-private struct CaptureMenuShortcut: ViewModifier {
-    var isEnabled: Bool
-
-    func body(content: Content) -> some View {
-        if isEnabled {
-            content.keyboardShortcut("2", modifiers: [.command, .shift])
-        } else {
-            content
+    /// Opens the settings window, optionally switching to a specific tab.
+    private func showSettings(_ tab: SettingsTab? = nil) {
+        if let tab {
+            selectedSettingsTab = tab.rawValue
         }
+        NSApp.activate()
+        openSettings()
     }
 }

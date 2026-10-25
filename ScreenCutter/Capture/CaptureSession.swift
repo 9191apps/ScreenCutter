@@ -7,6 +7,8 @@ final class CaptureSession: NSObject, ObservableObject {
     @Published private(set) var phase: CapturePhase = .idle
     @Published private(set) var hotKeyConflict: HotKeyConflict = .none
     @Published private(set) var regionChord: HotKeyChord = .regionCapture
+    @Published private(set) var fullScreenChord: HotKeyChord = .fullScreen
+    @Published private(set) var windowChord: HotKeyChord = .window
     @Published private(set) var fullScreenHotKeyEnabled = true
     @Published private(set) var windowHotKeyEnabled = true
     @Published private(set) var fullScreenConflict: HotKeyConflict = .none
@@ -24,10 +26,12 @@ final class CaptureSession: NSObject, ObservableObject {
     let annotationChanges = PassthroughSubject<Void, Never>()
     @Published private(set) var scrollIntent = false
     @Published private(set) var showLoupe: Bool
+    @Published private(set) var loupePreset: LoupePreset
     @Published private(set) var previewRect: PixelRect?
     @Published private(set) var snapshotVersion = 0
 
     private static let showLoupeKey = "showSelectionLoupe"
+    private static let loupePresetKey = "loupePreset"
 
     /// One undo step: the strokes as they were before an edit. Tool, color, and
     /// line width are intentionally not stored, so undo does not change them.
@@ -39,6 +43,30 @@ final class CaptureSession: NSObject, ObservableObject {
     private var annotationUndoStack: [AnnotationUndoStep] = []
 
     var editingImage: CGImage? { frozenImage }
+
+    /// The first registered shortcut that could not be bound, in menu order.
+    /// The menu surfaces it as a single item that opens Settings.
+    var activeHotKeyConflict: (chord: HotKeyChord, conflict: HotKeyConflict)? {
+        if hotKeyConflict != .none {
+            return (regionChord, hotKeyConflict)
+        }
+        if fullScreenHotKeyEnabled, fullScreenConflict != .none {
+            return (fullScreenChord, fullScreenConflict)
+        }
+        if windowHotKeyEnabled, windowConflict != .none {
+            return (windowChord, windowConflict)
+        }
+        return nil
+    }
+
+    var usesDefaultHotKeys: Bool {
+        regionChord == .regionCapture
+            && fullScreenChord == .fullScreen
+            && windowChord == .window
+            && fullScreenHotKeyEnabled
+            && windowHotKeyEnabled
+    }
+
     private var adjustmentOrigin: PixelRect?
     private var adjustmentHandle: SelectionHandle?
     private var adjustmentAnchor: PixelPoint?
@@ -62,6 +90,8 @@ final class CaptureSession: NSObject, ObservableObject {
 
     override init() {
         showLoupe = UserDefaults.standard.object(forKey: Self.showLoupeKey) as? Bool ?? true
+        loupePreset = UserDefaults.standard.string(forKey: Self.loupePresetKey)
+            .flatMap { LoupePreset(rawValue: $0) } ?? .fallback
         super.init()
         regionChord = HotKeyStore.loadRegion()
         hotKeys.onPressed = { [weak self] id in
@@ -398,6 +428,12 @@ final class CaptureSession: NSObject, ObservableObject {
         }
     }
 
+    func setLoupePreset(_ preset: LoupePreset) {
+        guard preset != loupePreset else { return }
+        loupePreset = preset
+        UserDefaults.standard.set(preset.rawValue, forKey: Self.loupePresetKey)
+    }
+
     func ensureSnapshot(displayID: CGDirectDisplayID) {
         ensureSnapshot(displayID: displayID, force: false)
     }
@@ -701,7 +737,9 @@ final class CaptureSession: NSObject, ObservableObject {
     }
 
     func refreshHotKey(shouldAlert: Bool) {
-        regionChord = HotKeyStore.loadRegion()
+        regionChord = HotKeyStore.load(HotKeySlotID.region)
+        fullScreenChord = HotKeyStore.load(HotKeySlotID.fullScreen)
+        windowChord = HotKeyStore.load(HotKeySlotID.window)
         fullScreenHotKeyEnabled = HotKeyStore.isEnabled(HotKeySlotID.fullScreen)
         windowHotKeyEnabled = HotKeyStore.isEnabled(HotKeySlotID.window)
         let conflicts = hotKeys.refresh(registrations())
@@ -718,10 +756,10 @@ final class CaptureSession: NSObject, ObservableObject {
     private func registrations() -> [HotKeyRegistration] {
         var items = [HotKeyRegistration(id: HotKeySlotID.region, chord: regionChord)]
         if fullScreenHotKeyEnabled {
-            items.append(HotKeyRegistration(id: HotKeySlotID.fullScreen, chord: .fullScreen))
+            items.append(HotKeyRegistration(id: HotKeySlotID.fullScreen, chord: fullScreenChord))
         }
         if windowHotKeyEnabled {
-            items.append(HotKeyRegistration(id: HotKeySlotID.window, chord: .window))
+            items.append(HotKeyRegistration(id: HotKeySlotID.window, chord: windowChord))
         }
         return items
     }
@@ -914,17 +952,32 @@ final class CaptureSession: NSObject, ObservableObject {
         }
     }
 
-    func beginHotKeyChange() {
-        guard let chord = HotKeyRecorder.capture() else { return }
-        let conflict = hotKeys.probe(chord, restoring: registrations())
+    func beginHotKeyChange(for slot: UInt32) {
+        let captured = HotKeyRecorder.capture(
+            title: "更改\(HotKeySlotID.title(for: slot))快捷键",
+            suspend: { self.hotKeys.suspend() },
+            resume: { self.refreshHotKey(shouldAlert: false) }
+        )
+        guard let captured else { return }
+        let conflict = hotKeys.probe(captured, restoring: registrations())
         guard conflict == .none else {
             AppAlert.show(
                 title: "快捷键不可用",
-                message: conflict.alertMessage(for: chord) ?? "这个快捷键无法使用。"
+                message: conflict.alertMessage(for: captured) ?? "这个快捷键无法使用。"
             )
             return
         }
-        HotKeyStore.saveRegion(chord)
+        HotKeyStore.save(captured, for: slot)
+        refreshHotKey(shouldAlert: false)
+    }
+
+    /// Restores the built-in chords and re-enables the optional shortcuts.
+    func resetHotKeys() {
+        for slot in HotKeySlotID.all {
+            HotKeyStore.reset(slot)
+        }
+        HotKeyStore.setEnabled(HotKeySlotID.fullScreen, true)
+        HotKeyStore.setEnabled(HotKeySlotID.window, true)
         refreshHotKey(shouldAlert: false)
     }
 
@@ -946,7 +999,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 buttons: ["更改快捷键", "好"]
             )
             if choice == 0 {
-                self?.beginHotKeyChange()
+                self?.beginHotKeyChange(for: HotKeySlotID.region)
             }
         }
     }

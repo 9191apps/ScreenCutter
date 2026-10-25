@@ -41,6 +41,12 @@ final class HotKeyMonitor {
         return HotKeyConflictChecker.resolve(entries: [], carbonStatus: status, chord: chord)
     }
 
+    /// Unregisters every hot key so a recorder can observe key presses without
+    /// triggering a capture. Call `refresh` to restore registrations.
+    func suspend() {
+        unregisterAll()
+    }
+
     private func register(_ registration: HotKeyRegistration) -> Int32 {
         installHandlerIfNeeded()
         var ref: EventHotKeyRef?

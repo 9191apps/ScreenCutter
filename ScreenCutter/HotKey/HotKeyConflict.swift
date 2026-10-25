@@ -32,6 +32,17 @@ nonisolated enum HotKeyConflict: Equatable, Sendable {
             return "\(chord.display) 已被其他应用占用。截屏仍可从菜单开始。"
         }
     }
+
+    func settingsMessage(for chord: HotKeyChord) -> String? {
+        switch self {
+        case .none:
+            return nil
+        case .systemShortcut:
+            return "\(chord.display) 与系统快捷键冲突，没有启用。"
+        case .otherApplication:
+            return "\(chord.display) 已被其他应用占用，没有启用。"
+        }
+    }
 }
 
 nonisolated struct HotKeyChord: Equatable, Sendable {
@@ -99,20 +110,50 @@ nonisolated struct HotKeyChord: Equatable, Sendable {
 }
 
 nonisolated enum HotKeyStore {
-    private static let keyCodeKey = "regionHotKey.keyCode"
-    private static let modifiersKey = "regionHotKey.carbonModifiers"
+    /// Existing region defaults keep their old names so upgrades keep the chord.
+    private static let regionPrefix = "regionHotKey"
+    private static let fullScreenPrefix = "fullScreenHotKey"
+    private static let windowPrefix = "windowHotKey"
 
-    static func loadRegion(from defaults: UserDefaults = .standard) -> HotKeyChord {
-        guard defaults.object(forKey: keyCodeKey) != nil else { return .regionCapture }
+    static func defaultChord(for id: UInt32) -> HotKeyChord {
+        switch id {
+        case HotKeySlotID.fullScreen:
+            return .fullScreen
+        case HotKeySlotID.window:
+            return .window
+        default:
+            return .regionCapture
+        }
+    }
+
+    static func load(_ id: UInt32, from defaults: UserDefaults = .standard) -> HotKeyChord {
+        let keyCodeKey = "\(prefix(for: id)).keyCode"
+        guard defaults.object(forKey: keyCodeKey) != nil else {
+            return defaultChord(for: id)
+        }
         return HotKeyChord(
             keyCode: defaults.integer(forKey: keyCodeKey),
-            carbonModifiers: UInt32(defaults.integer(forKey: modifiersKey))
+            carbonModifiers: UInt32(defaults.integer(forKey: "\(prefix(for: id)).carbonModifiers"))
         )
     }
 
+    static func save(_ chord: HotKeyChord, for id: UInt32, to defaults: UserDefaults = .standard) {
+        defaults.set(chord.keyCode, forKey: "\(prefix(for: id)).keyCode")
+        defaults.set(Int(chord.carbonModifiers), forKey: "\(prefix(for: id)).carbonModifiers")
+    }
+
+    /// Removes the stored chord so the slot falls back to its built-in default.
+    static func reset(_ id: UInt32, to defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: "\(prefix(for: id)).keyCode")
+        defaults.removeObject(forKey: "\(prefix(for: id)).carbonModifiers")
+    }
+
+    static func loadRegion(from defaults: UserDefaults = .standard) -> HotKeyChord {
+        load(HotKeySlotID.region, from: defaults)
+    }
+
     static func saveRegion(_ chord: HotKeyChord, to defaults: UserDefaults = .standard) {
-        defaults.set(chord.keyCode, forKey: keyCodeKey)
-        defaults.set(Int(chord.carbonModifiers), forKey: modifiersKey)
+        save(chord, for: HotKeySlotID.region, to: defaults)
     }
 
     static func isEnabled(_ id: UInt32, defaults: UserDefaults = .standard) -> Bool {
@@ -123,6 +164,17 @@ nonisolated enum HotKeyStore {
 
     static func setEnabled(_ id: UInt32, _ enabled: Bool, defaults: UserDefaults = .standard) {
         defaults.set(enabled, forKey: enabledKey(id))
+    }
+
+    private static func prefix(for id: UInt32) -> String {
+        switch id {
+        case HotKeySlotID.fullScreen:
+            return fullScreenPrefix
+        case HotKeySlotID.window:
+            return windowPrefix
+        default:
+            return regionPrefix
+        }
     }
 
     private static func enabledKey(_ id: UInt32) -> String {
@@ -139,6 +191,19 @@ nonisolated enum HotKeySlotID {
     static let region: UInt32 = 1
     static let fullScreen: UInt32 = 2
     static let window: UInt32 = 3
+
+    static let all: [UInt32] = [region, fullScreen, window]
+
+    static func title(for id: UInt32) -> String {
+        switch id {
+        case fullScreen:
+            return "整屏截屏"
+        case window:
+            return "窗口截屏"
+        default:
+            return "区域截屏"
+        }
+    }
 }
 
 nonisolated enum HotKeyConflictChecker {
