@@ -18,7 +18,7 @@ enum TextRecognition {
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
-        let lines = (request.results as? [VNRecognizedTextObservation])?
+        let lines = (request.results)?
             .compactMap { $0.topCandidates(1).first?.string } ?? []
         let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw TextRecognitionError.empty }
