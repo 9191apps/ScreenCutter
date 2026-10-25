@@ -79,34 +79,57 @@ enum ScreenCaptureService {
         return cropped
     }
 
-    /// A full-display frame with this app's own windows removed, used by the
-    /// selection magnifier. It is a one-shot snapshot, not a live stream. The
-    /// requested pixels come from the display mode, not `SCDisplay`'s logical
-    /// size, so the loupe's focus maps 1:1 on Retina screens.
-    static func snapshot(displayID: CGDirectDisplayID, pixelSize: CGSize? = nil) async throws -> CGImage {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-            throw CaptureError.displayUnavailable
+    nonisolated struct DisplayRequest: Sendable {
+        var displayID: CGDirectDisplayID
+        var pixelSize: CGSize
+
+        init(displayID: CGDirectDisplayID, pixelSize: CGSize) {
+            self.displayID = displayID
+            self.pixelSize = pixelSize
         }
+    }
+
+    /// One still frame per display with this app's own windows removed. The caller
+    /// takes these before the overlay appears, so the selection UI, the loupe, and
+    /// the exported pixels all describe the instant the shortcut was pressed.
+    ///
+    /// A display that fails to capture is simply absent from the result; the rest
+    /// still freeze. Frames come back at the display mode's native pixel size, not
+    /// `SCDisplay`'s logical size, so a pixel in the frame is a pixel on screen.
+    static func freeze(displays: [DisplayRequest]) async throws -> [CGDirectDisplayID: CGImage] {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let excluded = content.windows.filter { $0.owningApplication?.processID == ownPID }
-        let filter = SCContentFilter(display: display, excludingWindows: excluded)
 
-        let mode = CGDisplayCopyDisplayMode(displayID)
-        let requestedWidth = Int((pixelSize?.width ?? 0).rounded())
-        let requestedHeight = Int((pixelSize?.height ?? 0).rounded())
-        let pixelWidth = requestedWidth > 0 ? requestedWidth : (mode?.pixelWidth ?? display.width)
-        let pixelHeight = requestedHeight > 0 ? requestedHeight : (mode?.pixelHeight ?? display.height)
-        guard pixelWidth > 0, pixelHeight > 0 else {
-            throw CaptureError.displayUnavailable
+        var frames: [CGDirectDisplayID: CGImage] = [:]
+        for request in displays {
+            guard let display = content.displays.first(where: { $0.displayID == request.displayID }) else { continue }
+            let pixelWidth = Int(request.pixelSize.width.rounded())
+            let pixelHeight = Int(request.pixelSize.height.rounded())
+            guard pixelWidth > 0, pixelHeight > 0 else { continue }
+            let filter = SCContentFilter(display: display, excludingWindows: excluded)
+            let configuration = SCStreamConfiguration()
+            configuration.width = pixelWidth
+            configuration.height = pixelHeight
+            configuration.showsCursor = false
+            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            configuration.captureResolution = .nominal
+            configuration.scalesToFit = false
+            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) {
+                frames[request.displayID] = image
+            }
         }
-        let configuration = SCStreamConfiguration()
-        configuration.width = pixelWidth
-        configuration.height = pixelHeight
-        configuration.showsCursor = false
-        configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.captureResolution = .nominal
-        configuration.scalesToFit = false
-        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        return frames
+    }
+
+    /// Cuts the selection out of a frozen display frame. The selection is in the
+    /// display's native pixels, so this is a straight crop with no resampling; the
+    /// scale is only a guard for a frame that came back at another size.
+    nonisolated static func crop(_ image: CGImage, to selection: ScreenSelection) -> CGImage? {
+        let crop = selection.pixelRect
+            .scaled(from: selection.metrics.pixelSize, to: CGSize(width: image.width, height: image.height))
+            .clamped(toWidth: image.width, height: image.height)
+        guard crop.width >= 1, crop.height >= 1 else { return nil }
+        return image.cropping(to: crop.cgRect)
     }
 }

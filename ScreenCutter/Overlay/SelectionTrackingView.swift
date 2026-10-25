@@ -6,6 +6,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     let screenFrame: CGRect
     let metrics: DisplayMetrics
     let displayID: CGDirectDisplayID
+    private let backdrop = FrozenBackdropView(frame: .zero)
     private let dim = DimMaskView(frame: .zero)
     private let chrome = SelectionChromeView(frame: .zero)
     private let barContainer = NSVisualEffectView()
@@ -43,10 +44,14 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         laidOutPreview = session.previewRect
         laidOutShowLoupe = session.showLoupe
         laidOutScrollIntent = session.scrollIntent
+        backdrop.frame = bounds
+        backdrop.autoresizingMask = [.width, .height]
+        backdrop.setImage(session.frozenFrame(for: screen.displayID))
         dim.frame = bounds
         dim.autoresizingMask = [.width, .height]
         chrome.frame = bounds
         chrome.autoresizingMask = [.width, .height]
+        addSubview(backdrop)
         addSubview(dim)
         addSubview(chrome)
         installActionBar()
@@ -66,9 +71,6 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             session.$scrollIntent.sink { [weak self] scrolling in
                 self?.laidOutScrollIntent = scrolling
                 self?.layoutActionBar()
-            },
-            session.$snapshotVersion.sink { [weak self] _ in
-                self?.refreshLoupeAtMouse()
             },
             session.$showLoupe.sink { [weak self] showLoupe in
                 self?.laidOutShowLoupe = showLoupe
@@ -161,9 +163,6 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     override func mouseEntered(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
         updateCursor(at: local)
-        if session.phase.isSelecting {
-            session.ensureSnapshot(displayID: displayID)
-        }
         refreshLoupe(global: globalPoint(from: event))
     }
 
@@ -176,9 +175,6 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         let global = globalPoint(from: event)
         if session.phase.isPickingWindow {
             session.updateWindowHover(at: global, metrics: metrics)
-        }
-        if session.phase.isSelecting {
-            session.ensureSnapshot(displayID: displayID)
         }
         updateCursor(at: local)
         refreshLoupe(global: global)
@@ -250,9 +246,6 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if session.phase.isSelecting {
-            session.refreshSnapshotIfStale(displayID: displayID)
-        }
         if session.phase.isPickingWindow {
             session.confirmWindow(at: globalPoint(from: event), metrics: metrics)
             layoutActionBar()
@@ -274,7 +267,6 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             return
         }
         guard session.phase.isSelecting else { return }
-        session.ensureSnapshot(displayID: displayID)
         trackDrag(from: event)
     }
 
@@ -667,7 +659,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         guard laidOutShowLoupe,
               laidOutPhase.isSelecting,
               precisionPopover?.isShown != true,
-              let image = session.snapshot(for: displayID) else {
+              let image = session.frozenFrame(for: displayID) else {
             hideLoupe()
             return
         }

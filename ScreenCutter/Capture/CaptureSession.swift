@@ -47,6 +47,10 @@ final class CaptureSession: NSObject, ObservableObject {
     private let conflictAlertKey = "didShowHotKeyConflictAlert"
     private var listedWindows: [ListedWindow] = []
     private var frozenImage: CGImage?
+    /// One still per display, taken before the overlay appears. The selection, the
+    /// loupe, and the exported pixels all read from these, so the result is the
+    /// screen as it was when the shortcut fired.
+    private var frozenScreens: [CGDirectDisplayID: CGImage] = [:]
     private(set) var annotation = AnnotationDocument()
     private(set) var selectedAnnotation: Int?
     let annotationChanges = PassthroughSubject<Void, Never>()
@@ -54,7 +58,6 @@ final class CaptureSession: NSObject, ObservableObject {
     @Published private(set) var showLoupe: Bool
     @Published private(set) var loupePreset: LoupePreset
     @Published private(set) var previewRect: PixelRect?
-    @Published private(set) var snapshotVersion = 0
 
     private static let showLoupeKey = "showSelectionLoupe"
     private static let loupePresetKey = "loupePreset"
@@ -97,9 +100,6 @@ final class CaptureSession: NSObject, ObservableObject {
     private var adjustmentHandle: SelectionHandle?
     private var adjustmentAnchor: PixelPoint?
     private var snapWindows: [ListedWindow] = []
-    private var displaySnapshots: [CGDirectDisplayID: CGImage] = [:]
-    private var snapshotDates: [CGDirectDisplayID: Date] = [:]
-    private var snapshotRequests: Set<CGDirectDisplayID> = []
 
 #if DEBUG
     /// Testing hook: drives the overlay without screen recording permission or a live capture.
@@ -116,6 +116,11 @@ final class CaptureSession: NSObject, ObservableObject {
     func setEditingImageForTesting(_ image: CGImage?) {
         frozenImage = image
         annotationChanges.send()
+    }
+
+    /// Testing hook: installs the display stills the overlay would have taken.
+    func setFrozenScreensForTesting(_ frames: [CGDirectDisplayID: CGImage]) {
+        frozenScreens = frames
     }
 #endif
 
@@ -174,13 +179,39 @@ final class CaptureSession: NSObject, ObservableObject {
         guard phase == .idle else { return }
         guard requestScreenRecordingAccess() else { return }
         phase = .selecting(nil)
-        overlay.present(session: self)
-        installKeyMonitor()
-        let mouse = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
-            ensureSnapshot(displayID: screen.displayID)
+        presentFrozenOverlay { [weak self] in
+            self?.refreshSnapWindows()
         }
-        refreshSnapWindows()
+    }
+
+    /// Freezes every display, then presents the overlay. The order matters: if the
+    /// overlay went up first, the capture would include the dim and the overlay's
+    /// own windows. The delay is the capture itself, a few tens of milliseconds.
+    private func presentFrozenOverlay(onReady: @escaping () -> Void = {}) {
+        let requests = NSScreen.screens.map {
+            ScreenCaptureService.DisplayRequest(
+                displayID: $0.displayID,
+                pixelSize: $0.displayMetrics.pixelSize
+            )
+        }
+        Task { [weak self] in
+            let frames = (try? await ScreenCaptureService.freeze(displays: requests)) ?? [:]
+            guard let self, self.phase != .idle else { return }
+            // A black selection surface would be worse than an honest failure: the
+            // user could frame a region that never made it into the frame.
+            guard !frames.isEmpty else {
+                self.cancel()
+                AppAlert.show(
+                    title: "无法截屏",
+                    message: "没有读到屏幕画面。请在「系统设置 → 隐私与安全性 → 屏幕录制」里允许 ScreenCutter，然后重新启动应用。"
+                )
+                return
+            }
+            self.frozenScreens = frames
+            self.overlay.present(session: self)
+            self.installKeyMonitor()
+            onReady()
+        }
     }
 
     /// macOS shows its own authorization prompt the first time; afterwards the
@@ -207,8 +238,7 @@ final class CaptureSession: NSObject, ObservableObject {
             metrics: metrics,
             pixelRect: PixelRect(x: 0, y: 0, width: metrics.pixelWidth, height: metrics.pixelHeight)
         ))
-        overlay.present(session: self)
-        installKeyMonitor()
+        presentFrozenOverlay()
     }
 
     func beginWindowCapture() {
@@ -216,17 +246,18 @@ final class CaptureSession: NSObject, ObservableObject {
         guard requestScreenRecordingAccess() else { return }
         listedWindows = []
         phase = .windowPicking(nil)
-        overlay.present(session: self)
-        installKeyMonitor()
-        Task {
-            do {
-                let windows = try await WindowCatalog.frontToBack()
-                guard phase.isPickingWindow else { return }
-                listedWindows = windows
-            } catch {
-                guard phase.isPickingWindow else { return }
-                cancel()
-                AppAlert.show(title: "无法读取窗口", message: error.localizedDescription)
+        presentFrozenOverlay { [weak self] in
+            guard let self else { return }
+            Task {
+                do {
+                    let windows = try await WindowCatalog.frontToBack()
+                    guard self.phase.isPickingWindow else { return }
+                    self.listedWindows = windows
+                } catch {
+                    guard self.phase.isPickingWindow else { return }
+                    self.cancel()
+                    AppAlert.show(title: "无法读取窗口", message: error.localizedDescription)
+                }
             }
         }
     }
@@ -311,9 +342,6 @@ final class CaptureSession: NSObject, ObservableObject {
             phase = .selecting(nil)
             return
         }
-        // The loupe only runs during the drag; do not keep a full-screen frame
-        // alive for the action bar phase.
-        clearSnapshots()
         phase = .actionBar(ScreenSelection(metrics: drag.metrics, pixelRect: drag.pixelRect))
     }
 
@@ -452,11 +480,6 @@ final class CaptureSession: NSObject, ObservableObject {
     func setShowLoupe(_ enabled: Bool) {
         showLoupe = enabled
         UserDefaults.standard.set(enabled, forKey: Self.showLoupeKey)
-        guard enabled, phase.isSelecting else { return }
-        let mouse = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
-            ensureSnapshot(displayID: screen.displayID)
-        }
     }
 
     func setLoupePreset(_ preset: LoupePreset) {
@@ -465,54 +488,23 @@ final class CaptureSession: NSObject, ObservableObject {
         UserDefaults.standard.set(preset.rawValue, forKey: Self.loupePresetKey)
     }
 
-    func ensureSnapshot(displayID: CGDirectDisplayID) {
-        ensureSnapshot(displayID: displayID, force: false)
+    /// The frozen still for a display, taken when the overlay was requested.
+    /// Selecting a region never re-grabs the screen, so the magnifier and the
+    /// export show the same pixels.
+    func frozenFrame(for displayID: CGDirectDisplayID) -> CGImage? {
+        frozenScreens[displayID]
     }
 
-    /// The loupe is a freeze-frame. Take a fresh one when a drag starts after the
-    /// previous capture has gone stale, while keeping the old image visible until
-    /// the new one arrives.
-    func refreshSnapshotIfStale(displayID: CGDirectDisplayID) {
-        guard showLoupe else { return }
-        if let date = snapshotDates[displayID], Date().timeIntervalSince(date) < 1 {
-            return
-        }
-        ensureSnapshot(displayID: displayID, force: true)
+    /// The selection's pixels out of the frozen frame, or nil when that display
+    /// was not captured. Callers fall back to a live grab in that case.
+    func frozenImage(for selection: ScreenSelection) -> CGImage? {
+        guard let frame = frozenScreens[selection.screenID] else { return nil }
+        return ScreenCaptureService.crop(frame, to: selection)
     }
 
-    private func ensureSnapshot(displayID: CGDirectDisplayID, force: Bool) {
-        guard showLoupe, !snapshotRequests.contains(displayID) else { return }
-        if !force, displaySnapshots[displayID] != nil { return }
-        snapshotRequests.insert(displayID)
-        Task {
-            defer { snapshotRequests.remove(displayID) }
-            let pixelSize = NSScreen.screens
-                .first(where: { $0.displayID == displayID })?
-                .displayMetrics.pixelSize
-            guard let image = try? await ScreenCaptureService.snapshot(
-                displayID: displayID,
-                pixelSize: pixelSize
-            ) else { return }
-            guard phase.isSelecting else { return }
-            displaySnapshots[displayID] = image
-            snapshotDates[displayID] = Date()
-            snapshotVersion += 1
-        }
-    }
-
-    func snapshot(for displayID: CGDirectDisplayID) -> CGImage? {
-        displaySnapshots[displayID]
-    }
-
-    private func clearSnapshots() {
-        displaySnapshots.removeAll()
-        snapshotDates.removeAll()
-        snapshotRequests.removeAll()
-    }
-
-    private func clearSnapshotState() {
+    private func clearFrozenState() {
         clearPreview()
-        clearSnapshots()
+        frozenScreens.removeAll()
         snapWindows.removeAll()
     }
 
@@ -527,7 +519,7 @@ final class CaptureSession: NSObject, ObservableObject {
         listedWindows = []
         scrollIntent = false
         clearPreview()
-        clearSnapshotState()
+        clearFrozenState()
         phase = .idle
     }
 
@@ -536,6 +528,9 @@ final class CaptureSession: NSObject, ObservableObject {
         phase = .working(selection)
         overlay.hide()
         removeKeyMonitor()
+        // Stitching follows the live screen, so the frozen frames are dead weight
+        // from here on. Release them before the scroll loop allocates its slices.
+        clearFrozenState()
         Task {
             await waitForOverlayToDisappear()
             let result = await ScrollCapture.run(selection: selection)
@@ -548,7 +543,7 @@ final class CaptureSession: NSObject, ObservableObject {
             case nil:
                 overlay.close()
                 scrollIntent = false
-                clearSnapshotState()
+                clearFrozenState()
                 phase = .idle
                 AppAlert.show(title: "滚动长图失败", message: "没有截到可拼接的画面。")
             }
@@ -560,7 +555,7 @@ final class CaptureSession: NSObject, ObservableObject {
             try ImageExport.copyToPasteboard(image)
             overlay.close()
             scrollIntent = false
-            clearSnapshotState()
+            clearFrozenState()
             phase = .idle
             overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             if let partialMessage {
@@ -569,7 +564,7 @@ final class CaptureSession: NSObject, ObservableObject {
         } catch {
             overlay.close()
             scrollIntent = false
-            clearSnapshotState()
+            clearFrozenState()
             phase = .idle
             AppAlert.show(title: "滚动长图失败", message: error.localizedDescription)
         }
@@ -581,6 +576,14 @@ final class CaptureSession: NSObject, ObservableObject {
         replaceAnnotation(AnnotationDocument())
         annotationUndoStack.removeAll()
         phase = .editing(selection)
+        // The frozen frame is already the right pixels, so annotation starts
+        // synchronously. Only a display that failed to freeze falls back to a
+        // live grab.
+        if let image = frozenImage(for: selection) {
+            frozenImage = image
+            annotationChanges.send()
+            return
+        }
         Task {
             do {
                 let image = try await ScreenCaptureService.capture(selection)
@@ -717,25 +720,11 @@ final class CaptureSession: NSObject, ObservableObject {
             return
         }
         guard case .actionBar(let selection) = phase else { return }
-        phase = .working(selection)
-        overlay.hide()
-        removeKeyMonitor()
-        Task {
-            do {
-                await waitForOverlayToDisappear()
-                let image = try await ScreenCaptureService.capture(selection)
-                try ImageExport.copyToPasteboard(image)
-                overlay.close()
-                clearSnapshotState()
-                phase = .idle
-                overlay.showHUD("已复制", screenFrame: selection.screenFrame)
-            } catch {
-                overlay.close()
-                clearSnapshotState()
-                phase = .idle
-                AppAlert.show(title: "截屏失败", message: error.localizedDescription)
-            }
+        if let image = frozenImage(for: selection) {
+            deliverSelectionImage(image, selection: selection, save: false)
+            return
         }
+        captureLiveSelection(selection, save: false)
     }
 
     func saveSelection() {
@@ -744,6 +733,16 @@ final class CaptureSession: NSObject, ObservableObject {
             return
         }
         guard case .actionBar(let selection) = phase else { return }
+        if let image = frozenImage(for: selection) {
+            deliverSelectionImage(image, selection: selection, save: true)
+            return
+        }
+        captureLiveSelection(selection, save: true)
+    }
+
+    /// Fallback for a display that failed to freeze: hide the overlay, let it leave
+    /// the screen, then grab the pixels now. The normal path never does this.
+    private func captureLiveSelection(_ selection: ScreenSelection, save: Bool) {
         phase = .working(selection)
         overlay.hide()
         removeKeyMonitor()
@@ -751,19 +750,48 @@ final class CaptureSession: NSObject, ObservableObject {
             do {
                 await waitForOverlayToDisappear()
                 let image = try await ScreenCaptureService.capture(selection)
-                switch try ImageExport.saveWithPanel(image) {
-                case .saved:
-                    overlay.close()
-                    clearSnapshotState()
-                    phase = .idle
-                    overlay.showHUD("已保存", screenFrame: selection.screenFrame)
-                case .cancelled:
-                    restoreActionBar(selection)
-                }
+                deliverSelectionImage(image, selection: selection, save: save)
             } catch {
                 restoreActionBar(selection)
-                AppAlert.show(title: "无法保存截屏", message: error.localizedDescription)
+                AppAlert.show(
+                    title: save ? "无法保存截屏" : "截屏失败",
+                    message: error.localizedDescription
+                )
             }
+        }
+    }
+
+    /// Copies or saves an image that was already taken. The save panel changes the
+    /// activation policy, so the overlay steps aside and comes back if it is cancelled.
+    private func deliverSelectionImage(_ image: CGImage, selection: ScreenSelection, save: Bool) {
+        if !save {
+            do {
+                try ImageExport.copyToPasteboard(image)
+                overlay.close()
+                clearFrozenState()
+                phase = .idle
+                overlay.showHUD("已复制", screenFrame: selection.screenFrame)
+            } catch {
+                restoreActionBar(selection)
+                AppAlert.show(title: "截屏失败", message: error.localizedDescription)
+            }
+            return
+        }
+        overlay.hide()
+        removeKeyMonitor()
+        do {
+            switch try ImageExport.saveWithPanel(image) {
+            case .saved:
+                overlay.close()
+                clearFrozenState()
+                phase = .idle
+                overlay.showHUD("已保存", screenFrame: selection.screenFrame)
+            case .cancelled:
+                restoreActionBar(selection)
+            }
+        } catch {
+            restoreActionBar(selection)
+            AppAlert.show(title: "无法保存截屏", message: error.localizedDescription)
         }
     }
 
@@ -826,7 +854,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 overlay.close()
                 frozenImage = nil
                 replaceAnnotation(AnnotationDocument())
-                clearSnapshotState()
+                clearFrozenState()
                 phase = .idle
                 overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             } catch {
@@ -842,7 +870,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 overlay.close()
                 frozenImage = nil
                 replaceAnnotation(AnnotationDocument())
-                clearSnapshotState()
+                clearFrozenState()
                 phase = .idle
                 overlay.showHUD("已保存", screenFrame: selection.screenFrame)
             case .cancelled:
