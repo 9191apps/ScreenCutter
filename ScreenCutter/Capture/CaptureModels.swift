@@ -133,4 +133,16 @@ enum CapturePhase: Equatable {
         if case .editing = self { return true }
         return false
     }
+
+    /// True when both phases are the same step of the interaction, so only the
+    /// geometry inside the payload differs. Drags republish this way once per
+    /// frame; the overlay uses it to skip work that only a step change needs.
+    func isSameInteraction(as other: CapturePhase) -> Bool {
+        switch (self, other) {
+        case (.selecting, .selecting), (.windowPicking, .windowPicking), (.actionBar, .actionBar):
+            return true
+        default:
+            return false
+        }
+    }
 }

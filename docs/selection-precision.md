@@ -117,6 +117,17 @@ label.pixelSize == outputPixelSize == croppedImage.size
 - 这一阶段不做基于 Accessibility 的控件级吸附，避免新增辅助功能权限。
 - 后续可选：从放大镜底图做“内容边”磁吸——沿移动方向扫描 ±8px 的亮度/色差梯度，超过阈值才吸。纯 CPU、可单测，但要单独评估误吸率。
 
+### 4. 拖起来跟手：每帧只做必须做的事
+
+选区建立后拖边、拖角或整体移动时，`phase` 每一帧都要变一次。选区本身很小，但这一步曾经明显发卡，原因不在几何计算：
+
+- **`phase` 曾经是 `@Published`。** 菜单栏内容和设置窗口都 `@ObservedObject` 整个 `CaptureSession`，而设置窗口关掉后仍留在视图树里。于是每拖动一次，SwiftUI 就在遮罩提交显示周期的同一帧里重算这些 body。`sample` 采样（拖边 3 秒，Debug 构建）显示：显示周期相关的工作占主线程墙钟时间约 42%，其中近一半是隐藏窗口的 `NSHostingView.layout`（约 400/1850 个采样）。现在 `phase` 是普通属性，遮罩订阅 `phaseChanges`，SwiftUI 只看 `isEditingSelection` 这种粗粒度状态。同一手势下这部分降到约 1%，`NSHostingView` 采样为零。
+- **同一阶段内只有几何变化。** `SelectionTrackingView.apply(phase:)` 用 `isSameInteraction(as:)` 分开两条路径：同一交互内只重画遮罩、边框和操作条位置；只有阶段切换才重算光标区域、光标形状、放大镜、标注画布和按钮显隐。
+- **拖拽事件按帧合并。** 显示一帧最多提交一次，回放队列里每个 `leftMouseDragged` 只会让选区越拖越落后于指针。两个跟踪循环都用 `newestPendingDrag(after:)` 取最新位置，`.eventTracking` 模式消费，不惊动其它 run loop 源。
+- **边框视图只重画变化区域。** `SelectionChromeView` 覆盖整屏，整视图标脏会让 AppKit 每帧重新光栅化一块 4K 图层，只为画 4px 边框。现在只把旧、新 chrome 的并集标脏，并缓存尺寸标签的文字度量。
+
+改完后同一个拖拽手势里主线程约 89% 的时间在等下一个事件，一帧的显示工作降到 1ms 量级。回归测试在 `ScreenCutterTests/Overlay/PhaseObservationTests.swift`。
+
 ## 分阶段
 
 | 阶段 | 内容 | 规模 | 可独立发布 |

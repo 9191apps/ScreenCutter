@@ -20,17 +20,15 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     private var precisionPopover: NSPopover?
     private var observations: [AnyCancellable] = []
     private var trackingArea: NSTrackingArea?
-    /// The phase this overlay last laid out for.
-    /// `@Published` emits during `willSet`, so reading `session.phase` from the
-    /// subscription would see the previous value. The publisher's value is the
-    /// only reliable snapshot at layout time.
+    /// The phase this overlay last laid out for. The overlay keeps its own copy so
+    /// layout and hit testing always agree, even if the session has moved on.
     private var laidOutPhase: CapturePhase = .idle
     /// The cursor to keep while a drag is in progress. The modal event loops
     /// below do not dispatch mouse-moved events, so the cursor has to be set
     /// explicitly when a drag starts.
     private var dragCursor: CursorIntent?
-    // `@Published` emits during `willSet`; these mirror the last published values
-    // so layout never reads the previous state off `session`.
+    // These mirror the last published values so layout never reads state that
+    // could have moved on since the update arrived.
     private var laidOutPreview: PixelRect?
     private var laidOutShowLoupe = true
     private var laidOutScrollIntent = false
@@ -62,7 +60,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         loupe.setPreset(session.loupePreset)
         addSubview(loupe)
         observations = [
-            session.$phase.sink { [weak self] next in
+            session.phaseChanges.sink { [weak self] next in
                 self?.apply(phase: next)
             },
             session.$scrollIntent.sink { [weak self] scrolling in
@@ -325,7 +323,8 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             if next.type == .keyDown || next.type == .keyUp {
                 continue
             }
-            lastMouse = globalPoint(from: next)
+            let dragged = next.type == .leftMouseDragged ? newestPendingDrag(after: next) : next
+            lastMouse = globalPoint(from: dragged)
             if let spaceMove {
                 let delta = CGPoint(x: lastMouse.x - spaceMove.mouse.x, y: lastMouse.y - spaceMove.mouse.y)
                 let moved = SelectionGeometry.movedSelection(
@@ -342,8 +341,8 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             publish(
                 anchor: anchor,
                 current: current,
-                flags: next.modifierFlags,
-                snapEnabled: spaceMove == nil && !next.modifierFlags.contains(.control),
+                flags: dragged.modifierFlags,
+                snapEnabled: spaceMove == nil && !dragged.modifierFlags.contains(.control),
                 constrainSquare: spaceMove == nil
             )
             refreshLoupe(global: current)
@@ -380,10 +379,11 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             if current.type == .keyDown || current.type == .keyUp {
                 continue
             }
-            lastMouse = globalPoint(from: current)
+            let dragged = current.type == .leftMouseDragged ? newestPendingDrag(after: current) : current
+            lastMouse = globalPoint(from: dragged)
             session.updateAdjustment(
                 to: lastMouse,
-                snapEnabled: !current.modifierFlags.contains(.control)
+                snapEnabled: !dragged.modifierFlags.contains(.control)
             )
             refreshLoupe(global: lastMouse)
             if current.type == .leftMouseUp {
@@ -393,6 +393,26 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
                 return
             }
         }
+    }
+
+    /// The display commits at most once per frame, so replaying every queued
+    /// `leftMouseDragged` only makes the selection trail the pointer: a mouse that
+    /// reports faster than the display leaves a backlog that grows for as long as
+    /// the drag lasts. Keep the freshest position and drop the rest.
+    ///
+    /// Draining runs in `.eventTracking`, so the pending events are consumed
+    /// without running the rest of the app's run loop sources.
+    private func newestPendingDrag(after event: NSEvent) -> NSEvent {
+        var latest = event
+        while let next = window?.nextEvent(
+            matching: [.leftMouseDragged],
+            until: Date(),
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            latest = next
+        }
+        return latest
     }
 
     private func publish(
@@ -462,12 +482,22 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     }
 
     private func apply(phase next: CapturePhase) {
+        let previous = laidOutPhase
         laidOutPhase = next
+        // A drag republishes the same kind of phase once per frame; only the
+        // geometry moved. Re-running the whole layout (cursor rects, cursor,
+        // loupe, annotation canvas, button visibility) for every mouse event was
+        // the expensive part of adjusting a selection.
+        let sameInteraction = next.isSameInteraction(as: previous)
         if !next.showsActionBar {
             laidOutPreview = nil
             closePrecisionPopover()
         }
         layoutDim()
+        if sameInteraction {
+            layoutActionBarFrame()
+            return
+        }
         layoutActionBar()
         layoutAnnotationCanvas()
         window?.invalidateCursorRects(for: self)
@@ -565,6 +595,8 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
         }
     }
 
+    /// Puts the bar in place and decides which buttons it shows. Runs on phase
+    /// transitions and on `scrollIntent` changes, not on every pointer move.
     private func layoutActionBar() {
         guard laidOutPhase.showsActionBar,
               case .actionBar(let selection) = laidOutPhase,
@@ -574,6 +606,23 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             refreshLoupeAtMouse()
             return
         }
+        let scrolling = laidOutScrollIntent
+        scrollButton.isHidden = !scrolling
+        annotateButton.isHidden = scrolling
+        copyButton.isHidden = scrolling
+        saveButton.isHidden = scrolling
+        precisionButton.isHidden = false
+        barContainer.isHidden = false
+        layoutActionBarFrame()
+        refreshLoupeAtMouse()
+    }
+
+    /// Follows the selection while it is being resized or moved. Only the frame
+    /// changes, so this stays cheap enough to run once per frame.
+    private func layoutActionBarFrame() {
+        guard laidOutPhase.showsActionBar,
+              case .actionBar(let selection) = laidOutPhase,
+              selection.screenID == displayID else { return }
         let local = SelectionGeometry.displayLocalRect(
             selection: selection.globalRect,
             screenFrame: screenFrame
@@ -584,20 +633,15 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             barSize: SelectionGeometry.actionBarSize,
             margin: SelectionGeometry.actionBarMargin
         )
-        let scrolling = laidOutScrollIntent
-        scrollButton.isHidden = !scrolling
-        annotateButton.isHidden = scrolling
-        copyButton.isHidden = scrolling
-        saveButton.isHidden = scrolling
-        precisionButton.isHidden = false
-        barContainer.isHidden = false
-        barContainer.frame = NSRect(
+        let target = NSRect(
             x: frame.minX,
             y: bounds.height - frame.maxY,
             width: frame.width,
             height: frame.height
         )
-        refreshLoupeAtMouse()
+        if barContainer.frame != target {
+            barContainer.frame = target
+        }
     }
 
     private func refreshLoupeAtMouse() {

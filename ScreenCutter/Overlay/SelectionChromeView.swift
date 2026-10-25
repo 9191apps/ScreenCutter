@@ -9,6 +9,14 @@ final class SelectionChromeView: NSView {
     private var selectionRect: CGRect = .zero
     private var label = ""
     private var handlePoints: [CGPoint] = []
+    private var labelText: NSString?
+    private var labelTextSize: CGSize = .zero
+
+    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+    private static let labelAttributes: [NSAttributedString.Key: Any] = [
+        .font: labelFont,
+        .foregroundColor: NSColor.white,
+    ]
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -27,14 +35,48 @@ final class SelectionChromeView: NSView {
 
     /// `rect` and `handles` are in this view's AppKit coordinates.
     func update(rect: CGRect, label: String, handles: [CGPoint]) {
+        let previousBounds = chromeBounds()
+        if label != self.label {
+            let text = label as NSString
+            labelText = label.isEmpty ? nil : text
+            labelTextSize = label.isEmpty ? .zero : text.size(withAttributes: Self.labelAttributes)
+            self.label = label
+        }
         selectionRect = rect
-        self.label = label
         handlePoints = visibleHandles(in: rect, from: handles)
-        needsDisplay = true
+        // Resizing redraws this view once per frame. This view covers the whole
+        // screen, so marking all of it dirty makes AppKit re-rasterize a 4K layer
+        // for a two-pixel border. Only the old and new chrome need to be repainted.
+        let dirty = previousBounds.union(chromeBounds())
+        if dirty.isNull || dirty.isInfinite {
+            needsDisplay = true
+        } else {
+            setNeedsDisplay(dirty)
+        }
     }
 
     /// Resize knobs currently drawn, in this view's coordinates.
     var resizeHandlePoints: [CGPoint] { handlePoints }
+
+    /// Everything `draw` can touch: the border, the handles, and the size label,
+    /// which sits just outside the selection on the wide side of the screen.
+    private func chromeBounds() -> CGRect {
+        guard selectionRect.width > 0, selectionRect.height > 0 else { return .null }
+        var chrome = selectionRect.insetBy(dx: -12, dy: -12)
+        guard labelTextSize.width > 0 else { return chrome }
+        let size = CGSize(width: labelTextSize.width + 12, height: labelTextSize.height + 4)
+        // The label is drawn 14pt away from the selection, above it when there is
+        // room and below it otherwise. Both spots count as dirty.
+        for centerY in [selectionRect.maxY + 14, selectionRect.minY - 14] {
+            chrome = chrome.union(CGRect(
+                x: selectionRect.midX - size.width / 2,
+                y: centerY - size.height / 2,
+                width: size.width,
+                height: size.height
+            ))
+        }
+        return chrome
+    }
 
     private func visibleHandles(in rect: CGRect, from points: [CGPoint]) -> [CGPoint] {
         guard rect.width >= 8, rect.height >= 8 else { return [] }
@@ -101,14 +143,8 @@ final class SelectionChromeView: NSView {
     }
 
     private func drawLabel() {
-        guard !label.isEmpty else { return }
-        let text = label as NSString
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.white,
-        ]
-        let textSize = text.size(withAttributes: attributes)
+        guard let text = labelText, labelTextSize.width > 0 else { return }
+        let textSize = labelTextSize
         let size = CGSize(width: textSize.width + 12, height: textSize.height + 4)
         let centerY: CGFloat
         if bounds.height - selectionRect.maxY > 28 {
@@ -130,6 +166,6 @@ final class SelectionChromeView: NSView {
             width: textSize.width,
             height: textSize.height
         )
-        text.draw(in: textRect, withAttributes: attributes)
+        text.draw(in: textRect, withAttributes: Self.labelAttributes)
     }
 }

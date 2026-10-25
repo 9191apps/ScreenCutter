@@ -4,7 +4,33 @@ import Foundation
 
 @MainActor
 final class CaptureSession: NSObject, ObservableObject {
-    @Published private(set) var phase: CapturePhase = .idle
+    /// The interactive phase. It is deliberately not `@Published`: dragging a
+    /// handle republishes it once per frame, and every SwiftUI view that observes
+    /// the session (`CaptureMenu`, the Settings window, which stays in the view
+    /// tree while hidden) would then re-render its body in the middle of the
+    /// overlay's display cycle. That layout work alone was several milliseconds
+    /// per frame on a 60 Hz display and made dragging feel like it stuttered.
+    ///
+    /// The overlay listens to `phaseChanges` instead, and SwiftUI only sees the
+    /// coarse state it actually renders (`isEditingSelection`).
+    private(set) var phase: CapturePhase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            phaseChanges.send(phase)
+            let editing = phase.isEditing
+            if isEditingSelection != editing {
+                isEditingSelection = editing
+            }
+        }
+    }
+
+    /// The one piece of `phase` the menu renders. Published so the menu updates
+    /// when annotation starts or ends, and not on every pointer move.
+    @Published private(set) var isEditingSelection = false
+
+    /// Phase changes for the overlay windows. Sent after `phase` is updated.
+    let phaseChanges = PassthroughSubject<CapturePhase, Never>()
+
     @Published private(set) var hotKeyConflict: HotKeyConflict = .none
     @Published private(set) var regionChord: HotKeyChord = .regionCapture
     @Published private(set) var fullScreenChord: HotKeyChord = .fullScreen
@@ -77,8 +103,13 @@ final class CaptureSession: NSObject, ObservableObject {
 
 #if DEBUG
     /// Testing hook: drives the overlay without screen recording permission or a live capture.
+    /// An unchanged phase is republished so a test can force a re-layout.
     func setPhaseForTesting(_ phase: CapturePhase) {
+        let unchanged = self.phase == phase
         self.phase = phase
+        if unchanged {
+            phaseChanges.send(phase)
+        }
     }
 
     /// Testing hook: supplies the frozen image that annotation drawing operates on.

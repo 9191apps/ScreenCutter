@@ -64,7 +64,7 @@ private struct CaptureMenu: View {
             session.beginScrollCapture()
         }
 
-        if session.phase.isEditing {
+        if session.isEditingSelection {
             Divider()
             Button("拷贝文字") {
                 session.copyRecognizedText()
