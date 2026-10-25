@@ -20,6 +20,25 @@ final class ScrollStitchTests: XCTestCase {
         XCTAssertNil(ScrollStitch.join(base: base, next: next))
     }
 
+    /// Manual mode calls `join` again when the content has settled. An
+    /// unchanged frame must not be appended, otherwise finishing while idle
+    /// would duplicate the last viewport.
+    func testJoinRejectsAnUnchangedFrame() {
+        let frame = slice(width: 4, rows: Array(0..<40))
+        XCTAssertNil(ScrollStitch.join(base: frame, next: frame))
+    }
+
+    /// A small manual scroll still has a valid overlap and appends only the
+    /// rows that scrolled into view.
+    func testJoinAppendsASmallManualScroll() {
+        let base = slice(width: 4, rows: Array(0..<40))
+        let next = slice(width: 4, rows: Array(3..<43))
+        let joined = ScrollStitch.join(base: base, next: next)
+        XCTAssertEqual(joined?.overlap, 37)
+        XCTAssertEqual(joined?.appendedRows, 3)
+        XCTAssertEqual(joined?.image.height, 43)
+    }
+
     func testSliceKeepsTheTopRowAtTheStartOfTheBuffer() throws {
         guard let context = CGContext(
             data: nil,

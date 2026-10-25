@@ -106,6 +106,13 @@ struct WindowHover: Equatable {
     var globalRect: CGRect { metrics.globalRect(for: pixelRect) }
 }
 
+/// Which scrolling-capture flow the next action bar starts. `nil` is a normal
+/// region capture.
+enum ScrollIntent: Equatable {
+    case automatic
+    case manual
+}
+
 enum CapturePhase: Equatable {
     case idle
     case selecting(SelectionDrag?)

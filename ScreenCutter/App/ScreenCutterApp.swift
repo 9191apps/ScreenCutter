@@ -64,6 +64,10 @@ private struct CaptureMenu: View {
             session.beginScrollCapture()
         }
 
+        Button("手动滚动长图") {
+            session.beginManualScrollCapture()
+        }
+
         if session.isEditingSelection {
             Divider()
             Button("拷贝文字") {

@@ -43,6 +43,8 @@ final class CaptureSession: NSObject, ObservableObject {
 
     private let hotKeys = HotKeyMonitor()
     private let overlay = OverlayController()
+    private let manualScrollPanel = ManualScrollPanel()
+    private var manualScrollControl: ManualScrollControl?
     private var keyMonitor: Any?
     private let conflictAlertKey = "didShowHotKeyConflictAlert"
     private var listedWindows: [ListedWindow] = []
@@ -54,7 +56,7 @@ final class CaptureSession: NSObject, ObservableObject {
     private(set) var annotation = AnnotationDocument()
     private(set) var selectedAnnotation: Int?
     let annotationChanges = PassthroughSubject<Void, Never>()
-    @Published private(set) var scrollIntent = false
+    @Published private(set) var scrollIntent: ScrollIntent?
     @Published private(set) var showLoupe: Bool
     @Published private(set) var loupePreset: LoupePreset
     @Published private(set) var previewRect: PixelRect?
@@ -165,13 +167,19 @@ final class CaptureSession: NSObject, ObservableObject {
     }
 
     func begin() {
-        scrollIntent = false
+        scrollIntent = nil
         startSelection()
     }
 
     func beginScrollCapture() {
         guard phase == .idle else { return }
-        scrollIntent = true
+        scrollIntent = .automatic
+        startSelection()
+    }
+
+    func beginManualScrollCapture() {
+        guard phase == .idle else { return }
+        scrollIntent = .manual
         startSelection()
     }
 
@@ -230,6 +238,7 @@ final class CaptureSession: NSObject, ObservableObject {
 
     func captureFullScreen() {
         guard phase == .idle else { return }
+        scrollIntent = nil
         guard requestScreenRecordingAccess() else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
@@ -243,6 +252,7 @@ final class CaptureSession: NSObject, ObservableObject {
 
     func beginWindowCapture() {
         guard phase == .idle else { return }
+        scrollIntent = nil
         guard requestScreenRecordingAccess() else { return }
         listedWindows = []
         phase = .windowPicking(nil)
@@ -517,14 +527,31 @@ final class CaptureSession: NSObject, ObservableObject {
         replaceAnnotation(AnnotationDocument())
         annotationUndoStack.removeAll()
         listedWindows = []
-        scrollIntent = false
+        scrollIntent = nil
+        manualScrollPanel.close()
+        if let control = manualScrollControl {
+            Task { await control.requestCancel() }
+            manualScrollControl = nil
+        }
         clearPreview()
         clearFrozenState()
         phase = .idle
     }
 
-    func startScrollStitch() {
-        guard scrollIntent, case .actionBar(let selection) = phase else { return }
+    /// Starts whichever scrolling flow the menu or action bar selected.
+    func startPendingScroll() {
+        switch scrollIntent {
+        case .automatic:
+            startScrollStitch()
+        case .manual:
+            startManualScrollStitch()
+        case nil:
+            break
+        }
+    }
+
+    private func startScrollStitch() {
+        guard scrollIntent == .automatic, case .actionBar(let selection) = phase else { return }
         phase = .working(selection)
         overlay.hide()
         removeKeyMonitor()
@@ -542,7 +569,7 @@ final class CaptureSession: NSObject, ObservableObject {
                 deliverScrollImage(image, selection: selection, partialMessage: message)
             case nil:
                 overlay.close()
-                scrollIntent = false
+                scrollIntent = nil
                 clearFrozenState()
                 phase = .idle
                 AppAlert.show(title: "滚动长图失败", message: "没有截到可拼接的画面。")
@@ -550,20 +577,88 @@ final class CaptureSession: NSObject, ObservableObject {
         }
     }
 
-    private func deliverScrollImage(_ image: CGImage, selection: ScreenSelection, partialMessage: String?) {
-        do {
-            try ImageExport.copyToPasteboard(image)
+    /// The user drives the scroll; the capture loop only watches for the
+    /// content to settle and appends what it sees.
+    private func startManualScrollStitch() {
+        guard scrollIntent == .manual, case .actionBar(let selection) = phase else { return }
+        phase = .working(selection)
+        overlay.hide()
+        removeKeyMonitor()
+        clearFrozenState()
+
+        let control = ManualScrollControl()
+        manualScrollControl = control
+        manualScrollPanel.show(
+            selection: selection,
+            onFinish: { Task { await control.requestFinish() } },
+            onCancel: { Task { await control.requestCancel() } }
+        )
+        Task {
+            await waitForOverlayToDisappear()
+            let outcome = await ManualScrollCapture.run(
+                selection: selection,
+                control: control
+            ) { progress in
+                self.manualScrollPanel.update(progress)
+            }
+            guard phase == .working(selection) else { return }
+            finishManualScroll(outcome, selection: selection)
+        }
+    }
+
+    private func finishManualScroll(_ outcome: ManualScrollOutcome, selection: ScreenSelection) {
+        manualScrollControl = nil
+        switch outcome {
+        case .cancelled:
+            manualScrollPanel.close()
             overlay.close()
-            scrollIntent = false
+            scrollIntent = nil
+            clearFrozenState()
+            phase = .idle
+            overlay.showHUD("已取消", screenFrame: selection.screenFrame)
+        case .failed:
+            manualScrollPanel.close()
+            overlay.close()
+            scrollIntent = nil
+            clearFrozenState()
+            phase = .idle
+            AppAlert.show(title: "手动滚动失败", message: "没有截到可拼接的画面。")
+        case .finished(let image):
+            deliverScrollImage(image, selection: selection, partialMessage: nil)
+        case .partial(let image, let message):
+            deliverScrollImage(
+                image,
+                selection: selection,
+                partialMessage: message,
+                partialTitle: "手动滚动未完成"
+            )
+        }
+    }
+
+    private func deliverScrollImage(
+        _ image: CGImage,
+        selection: ScreenSelection,
+        partialMessage: String?,
+        partialTitle: String = "没有滚到底"
+    ) {
+        manualScrollControl = nil
+        do {
+            // Encoding a tall PNG can take a moment. Keep the manual panel's
+            // "正在完成…" state on screen until the clipboard is ready.
+            try ImageExport.copyToPasteboard(image)
+            manualScrollPanel.close()
+            overlay.close()
+            scrollIntent = nil
             clearFrozenState()
             phase = .idle
             overlay.showHUD("已复制", screenFrame: selection.screenFrame)
             if let partialMessage {
-                AppAlert.show(title: "没有滚到底", message: partialMessage)
+                AppAlert.show(title: partialTitle, message: partialMessage)
             }
         } catch {
+            manualScrollPanel.close()
             overlay.close()
-            scrollIntent = false
+            scrollIntent = nil
             clearFrozenState()
             phase = .idle
             AppAlert.show(title: "滚动长图失败", message: error.localizedDescription)
@@ -986,8 +1081,8 @@ final class CaptureSession: NSObject, ObservableObject {
             return true
         case CaptureKeyCode.returnKey, CaptureKeyCode.keypadEnter:
             if phase.showsActionBar {
-                if scrollIntent {
-                    startScrollStitch()
+                if scrollIntent != nil {
+                    startPendingScroll()
                 } else {
                     copySelection()
                 }

@@ -32,7 +32,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     // could have moved on since the update arrived.
     private var laidOutPreview: PixelRect?
     private var laidOutShowLoupe = true
-    private var laidOutScrollIntent = false
+    private var laidOutScrollIntent: ScrollIntent?
 
     init(session: CaptureSession, screen: NSScreen) {
         self.session = session
@@ -598,8 +598,9 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
             refreshLoupeAtMouse()
             return
         }
-        let scrolling = laidOutScrollIntent
+        let scrolling = laidOutScrollIntent != nil
         scrollButton.isHidden = !scrolling
+        scrollButton.title = laidOutScrollIntent == .manual ? "开始手动滚动" : "开始滚动"
         annotateButton.isHidden = scrolling
         copyButton.isHidden = scrolling
         saveButton.isHidden = scrolling
@@ -752,7 +753,7 @@ final class SelectionTrackingView: NSView, NSPopoverDelegate {
     }
 
     @objc private func scrollClicked() {
-        session.startScrollStitch()
+        session.startPendingScroll()
     }
 
     @objc private func annotateClicked() {
