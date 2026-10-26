@@ -64,27 +64,30 @@ nonisolated enum ScrollStitch {
 
     static func meanDifference(_ first: CapturedSlice, _ second: CapturedSlice) -> Double? {
         guard first.width == second.width, first.height == second.height, first.width > 0 else { return nil }
-        return difference(first, firstRow: 0, second, secondRow: 0, rows: first.height, width: first.width)
+        return meanDifference(first, firstRow: 0, second, firstRow: 0, rows: first.height)
     }
 
-    /// `preferredOverlap` is the expected shared row count after a known scroll step
-    /// (auto capture). When several overlaps score similarly — common with code
-    /// editors and repeating whitespace — pick the one closest to the expected
-    /// overlap instead of a shorter accidental match that skips content.
-    static func join(
-        base: CapturedSlice,
-        next: CapturedSlice,
-        preferredOverlap: Int? = nil,
-        overlapRange: ClosedRange<Int>? = nil
-    ) -> ScrollJoin? {
+    static func meanDifference(
+        _ first: CapturedSlice,
+        firstRow: Int,
+        _ second: CapturedSlice,
+        secondRow: Int,
+        rows: Int
+    ) -> Double {
+        guard first.width == second.width, first.width > 0, rows > 0 else { return .greatestFiniteMagnitude }
+        return difference(first, firstRow: firstRow, second, secondRow: secondRow, rows: rows, width: first.width)
+    }
+
+    /// Manual scrolling: search overlap height on the stitched image and `next`.
+    static func join(base: CapturedSlice, next: CapturedSlice) -> ScrollJoin? {
         guard base.width == next.width, base.width > 0, base.height >= minimumOverlap, next.height >= minimumOverlap else {
             return nil
         }
         let upper = min(base.height, next.height) - 1
         guard upper >= minimumOverlap else { return nil }
-        var scored: [(overlap: Int, score: Double)] = []
+        var bestOverlap: Int?
+        var bestScore = Double.greatestFiniteMagnitude
         for overlap in stride(from: upper, through: minimumOverlap, by: -1) {
-            if let overlapRange, !overlapRange.contains(overlap) { continue }
             let score = difference(
                 base,
                 firstRow: base.height - overlap,
@@ -93,24 +96,12 @@ nonisolated enum ScrollStitch {
                 rows: overlap,
                 width: base.width
             )
-            if score <= maximumMeanDifference {
-                scored.append((overlap, score))
+            if score < bestScore - 1 {
+                bestScore = score
+                bestOverlap = overlap
             }
         }
-        guard !scored.isEmpty else { return nil }
-        let minScore = scored.map(\.score).min()!
-        let scoreSlack = 1.0
-        let candidates = scored.filter { $0.score <= minScore + scoreSlack }
-        let overlap: Int
-        if let preferredOverlap {
-            overlap = candidates.min(by: {
-                abs($0.overlap - preferredOverlap) < abs($1.overlap - preferredOverlap)
-            })!.overlap
-        } else {
-            overlap = candidates.map(\.overlap).max()!
-        }
-        let bestScore = candidates.first(where: { $0.overlap == overlap })!.score
-        guard bestScore <= maximumMeanDifference else { return nil }
+        guard let overlap = bestOverlap, bestScore <= maximumMeanDifference else { return nil }
         let appended = next.height - overlap
         guard appended >= 2 else { return nil }
         var pixels = base.pixels

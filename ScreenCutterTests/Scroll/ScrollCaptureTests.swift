@@ -7,10 +7,14 @@ final class ScrollCaptureTests: XCTestCase {
         XCTAssertEqual(ScrollCapture.wheelDeltaPixels(for: 10), 40)
     }
 
-    func testPreferredOverlapTracksScrollStep() {
-        XCTAssertEqual(ScrollCapture.preferredOverlapRows(forFrameHeight: 100), 65)
-        let range = ScrollCapture.overlapSearchRange(forFrameHeight: 100)
-        XCTAssertTrue(range.contains(65))
-        XCTAssertGreaterThanOrEqual(range.lowerBound, ScrollStitch.minimumOverlap)
+    func testShiftSearchRangeCentersOnScrollStep() {
+        XCTAssertEqual(ScrollCapture.expectedNewRows(forFrameHeight: 100), 35)
+        let range = ScrollShift.shiftSearchRange(
+            frameHeight: 100,
+            expectedNewRows: 35,
+            slack: ScrollCapture.shiftSearchSlack(forExpectedNewRows: 35)
+        )
+        XCTAssertTrue(range.contains(35))
+        XCTAssertGreaterThanOrEqual(range.lowerBound, ScrollShift.minimumNewRows)
     }
 }
