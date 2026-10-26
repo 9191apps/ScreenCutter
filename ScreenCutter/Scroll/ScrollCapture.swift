@@ -68,7 +68,12 @@ enum ScrollCapture {
     private static func moveMouse(toAppKit point: CGPoint, primaryHeight: CGFloat) {
         let quartz = WindowGeometry.quartzPoint(fromAppKit: point, primaryHeight: primaryHeight)
         CGWarpMouseCursorPosition(quartz)
-        if let moved = CGEvent(mouseCGEventType: .mouseMoved, mouseCursorPosition: quartz, mouseButton: .left) {
+        if let moved = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: quartz,
+            mouseButton: .left
+        ) {
             moved.post(tap: .cghidEventTap)
         }
     }
