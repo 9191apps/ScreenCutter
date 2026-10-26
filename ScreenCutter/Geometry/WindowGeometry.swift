@@ -18,6 +18,15 @@ nonisolated enum WindowGeometry {
         )
     }
 
+    /// Global point in AppKit space (origin at the bottom left of the primary display).
+    static func quartzPoint(fromAppKit point: CGPoint, primaryHeight: CGFloat) -> CGPoint {
+        CGPoint(x: point.x, y: primaryHeight - point.y)
+    }
+
+    static func appKitPoint(fromQuartz point: CGPoint, primaryHeight: CGFloat) -> CGPoint {
+        CGPoint(x: point.x, y: primaryHeight - point.y)
+    }
+
     /// Front-to-back. The returned frame is clipped to `screenFrame`, so a window cannot select across displays.
     static func hit(point: CGPoint, windows: [ListedWindow], screenFrame: CGRect) -> (window: ListedWindow, visibleFrame: CGRect)? {
         for window in windows {
