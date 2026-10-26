@@ -20,20 +20,50 @@
 		A082FEBF308BA8B700BB16D4 /* ScreenCutter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScreenCutter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A082FECC308BA8B800BB16D4 /* ScreenCutterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScreenCutterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A082FEE4308BA8B800BB16D4 /* Config/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = SOURCE_ROOT; };
+		A082FEE5308BA8B900BB16D5 /* ScrollShift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollShift.swift; sourceTree = "<group>"; };
+		A082FEE8308BA8B900BB16D5 /* ScrollShiftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollShiftTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A082FEE7308BA8B900BB16D5 /* Exceptions for "ScreenCutter" folder in "ScreenCutter" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Scroll/ScrollShift.swift,
+			);
+			target = A082FEBE308BA8B700BB16D4 /* ScreenCutter */;
+		};
+		A082FEEA308BA8B900BB16D5 /* Exceptions for "ScreenCutterTests" folder in "ScreenCutterTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Scroll/ScrollShiftTests.swift,
+			);
+			target = A082FECB308BA8B800BB16D4 /* ScreenCutterTests */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A082FEC1308BA8B700BB16D4 /* ScreenCutter */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A082FEE7308BA8B900BB16D5 /* Exceptions for "ScreenCutter" folder in "ScreenCutter" target */,
+			);
 			path = ScreenCutter;
 			sourceTree = "<group>";
 		};
 		A082FECF308BA8B800BB16D4 /* ScreenCutterTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A082FEEA308BA8B900BB16D5 /* Exceptions for "ScreenCutterTests" folder in "ScreenCutterTests" target */,
+			);
 			path = ScreenCutterTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXBuildFile section */
+		A082FEE6308BA8B900BB16D5 /* ScrollShift.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082FEE5308BA8B900BB16D5 /* ScrollShift.swift */; };
+		A082FEE9308BA8B900BB16D5 /* ScrollShiftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082FEE8308BA8B900BB16D5 /* ScrollShiftTests.swift */; };
+/* End PBXBuildFile section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A082FEBC308BA8B700BB16D4 /* Frameworks */ = {
@@ -166,11 +196,13 @@
 		A082FEBB308BA8B700BB16D4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				A082FEE6308BA8B900BB16D5 /* ScrollShift.swift in Sources */,
 			);
 		};
 		A082FEC8308BA8B800BB16D4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				A082FEE9308BA8B900BB16D5 /* ScrollShiftTests.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */
