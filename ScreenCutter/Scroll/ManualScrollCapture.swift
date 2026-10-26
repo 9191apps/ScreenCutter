@@ -118,6 +118,8 @@ nonisolated struct ManualScrollAccumulator {
 /// Only settled frames are stitched, so momentum and mid-scroll repaints never
 /// end up in the long image.
 nonisolated enum ManualScrollCapture {
+    static let noSegmentsAppended = "没有拼接出新段落，只保留了第一屏。请在选区内滚动后再点完成。"
+
     /// 120 M pixels of RGBA is about 480 MB for the stitched buffer. One frame
     /// is allowed on top of that while the next join is being built.
     static let maximumStitchedPixels = 120_000_000
@@ -227,6 +229,9 @@ nonisolated enum ManualScrollCapture {
         }
         if let stopReason {
             return .partial(image, message: stopReason)
+        }
+        if state.segments == 0 {
+            return .partial(image, message: noSegmentsAppended)
         }
         return .finished(image)
     }
