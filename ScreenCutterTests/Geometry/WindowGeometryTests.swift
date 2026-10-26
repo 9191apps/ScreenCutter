@@ -11,6 +11,20 @@ final class WindowGeometryTests: XCTestCase {
         )
     }
 
+    func testGlobalPointConversionRoundTripsThroughQuartz() {
+        let primaryHeight: CGFloat = 900
+        let appKit = CGPoint(x: 120, y: 300)
+        let quartz = WindowGeometry.quartzPoint(fromAppKit: appKit, primaryHeight: primaryHeight)
+        XCTAssertEqual(quartz, CGPoint(x: 120, y: 600))
+        XCTAssertEqual(WindowGeometry.appKitPoint(fromQuartz: quartz, primaryHeight: primaryHeight), appKit)
+    }
+
+    func testQuartzPointAboveThePrimaryDisplayIsNegative() {
+        let primaryHeight: CGFloat = 900
+        let appKit = CGPoint(x: 50, y: 1100)
+        XCTAssertEqual(WindowGeometry.quartzPoint(fromAppKit: appKit, primaryHeight: primaryHeight).y, -200)
+    }
+
     func testHitPrefersTheFrontWindowAndClipsToTheCurrentScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1000, height: 800)
         let front = ListedWindow(windowID: 1, appKitFrame: CGRect(x: 100, y: 100, width: 400, height: 300), title: "前")

@@ -64,9 +64,21 @@ nonisolated enum ScrollStitch {
 
     static func meanDifference(_ first: CapturedSlice, _ second: CapturedSlice) -> Double? {
         guard first.width == second.width, first.height == second.height, first.width > 0 else { return nil }
-        return difference(first, firstRow: 0, second, secondRow: 0, rows: first.height, width: first.width)
+        return meanDifference(first, firstRow: 0, second, firstRow: 0, rows: first.height)
     }
 
+    static func meanDifference(
+        _ first: CapturedSlice,
+        firstRow: Int,
+        _ second: CapturedSlice,
+        secondRow: Int,
+        rows: Int
+    ) -> Double {
+        guard first.width == second.width, first.width > 0, rows > 0 else { return .greatestFiniteMagnitude }
+        return difference(first, firstRow: firstRow, second, secondRow: secondRow, rows: rows, width: first.width)
+    }
+
+    /// Manual scrolling: search overlap height on the stitched image and `next`.
     static func join(base: CapturedSlice, next: CapturedSlice) -> ScrollJoin? {
         guard base.width == next.width, base.width > 0, base.height >= minimumOverlap, next.height >= minimumOverlap else {
             return nil
@@ -111,20 +123,42 @@ nonisolated enum ScrollStitch {
         width: Int
     ) -> Double {
         var total = 0.0
-        let samples = min(width, 32)
-        let step = max(1, width / samples)
+        let step = max(1, width / 96)
         var count = 0
         for row in 0..<rows {
-            for column in stride(from: 0, to: width, by: step) {
-                let left = ((firstRow + row) * width + column) * 4
-                let right = ((secondRow + row) * width + column) * 4
-                for channel in 0..<3 {
-                    total += abs(Double(first.pixels[left + channel]) - Double(second.pixels[right + channel]))
-                }
-                count += 3
-            }
+            accumulateRowDifference(
+                first, firstRow: firstRow + row,
+                second, secondRow: secondRow + row,
+                width: width,
+                step: step,
+                into: &total,
+                count: &count
+            )
         }
         guard count > 0 else { return .greatestFiniteMagnitude }
         return total / Double(count)
+    }
+
+    private static func accumulateRowDifference(
+        _ first: CapturedSlice,
+        firstRow: Int,
+        _ second: CapturedSlice,
+        secondRow: Int,
+        width: Int,
+        step: Int,
+        into total: inout Double,
+        count: inout Int
+    ) {
+        let gutter = min(width, 72)
+        var column = 0
+        while column < width {
+            let left = (firstRow * width + column) * 4
+            let right = (secondRow * width + column) * 4
+            for channel in 0..<3 {
+                total += abs(Double(first.pixels[left + channel]) - Double(second.pixels[right + channel]))
+            }
+            count += 3
+            column += column < gutter ? 1 : step
+        }
     }
 }
