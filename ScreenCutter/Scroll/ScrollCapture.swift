@@ -12,10 +12,26 @@ enum ScrollCaptureResult {
 
 enum ScrollCapture {
     static let maximumSteps = 20
+    /// Smaller steps leave more vertical overlap so joins are less likely to
+    /// latch onto a short accidental match in repetitive code.
+    static let scrollStepFraction: CGFloat = 0.35
+    static let settleNanoseconds: UInt64 = 450_000_000
 
     /// Pixel scroll distance per step when using `CGScrollUnit.pixel`.
     static func wheelDeltaPixels(for pixelHeight: Int) -> Int32 {
-        Int32(max(40, CGFloat(pixelHeight) * 0.55))
+        Int32(max(40, CGFloat(pixelHeight) * scrollStepFraction))
+    }
+
+    static func preferredOverlapRows(forFrameHeight height: Int) -> Int {
+        max(ScrollStitch.minimumOverlap, height - Int(CGFloat(height) * scrollStepFraction))
+    }
+
+    static func overlapSearchRange(forFrameHeight height: Int) -> ClosedRange<Int> {
+        let preferred = preferredOverlapRows(forFrameHeight: height)
+        let slack = max(24, height / 6)
+        let low = max(ScrollStitch.minimumOverlap, preferred - slack)
+        let high = min(height - 2, preferred + slack)
+        return low...high
     }
 
     static func run(selection: ScreenSelection) async -> ScrollCaptureResult? {
@@ -31,7 +47,7 @@ enum ScrollCapture {
 
         for _ in 0..<maximumSteps {
             postScroll(at: selection, primaryHeight: primaryHeight)
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: settleNanoseconds)
             guard let nextImage = try? await ScreenCaptureService.capture(selection),
                   let next = ScrollStitch.slice(from: nextImage) else {
                 return partial(stitched)
@@ -42,7 +58,12 @@ enum ScrollCapture {
                 }
                 return partial(stitched, message: ScrollCaptureResult.couldNotScroll)
             }
-            guard let joined = ScrollStitch.join(base: stitched, next: next) else {
+            guard let joined = ScrollStitch.join(
+                base: stitched,
+                next: next,
+                preferredOverlap: preferredOverlapRows(forFrameHeight: next.height),
+                overlapRange: overlapSearchRange(forFrameHeight: next.height)
+            ) else {
                 return partial(stitched)
             }
             stitched = joined.image

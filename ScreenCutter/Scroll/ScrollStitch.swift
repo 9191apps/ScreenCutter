@@ -67,15 +67,24 @@ nonisolated enum ScrollStitch {
         return difference(first, firstRow: 0, second, secondRow: 0, rows: first.height, width: first.width)
     }
 
-    static func join(base: CapturedSlice, next: CapturedSlice) -> ScrollJoin? {
+    /// `preferredOverlap` is the expected shared row count after a known scroll step
+    /// (auto capture). When several overlaps score similarly — common with code
+    /// editors and repeating whitespace — pick the one closest to the expected
+    /// overlap instead of a shorter accidental match that skips content.
+    static func join(
+        base: CapturedSlice,
+        next: CapturedSlice,
+        preferredOverlap: Int? = nil,
+        overlapRange: ClosedRange<Int>? = nil
+    ) -> ScrollJoin? {
         guard base.width == next.width, base.width > 0, base.height >= minimumOverlap, next.height >= minimumOverlap else {
             return nil
         }
         let upper = min(base.height, next.height) - 1
         guard upper >= minimumOverlap else { return nil }
-        var bestOverlap: Int?
-        var bestScore = Double.greatestFiniteMagnitude
+        var scored: [(overlap: Int, score: Double)] = []
         for overlap in stride(from: upper, through: minimumOverlap, by: -1) {
+            if let overlapRange, !overlapRange.contains(overlap) { continue }
             let score = difference(
                 base,
                 firstRow: base.height - overlap,
@@ -84,12 +93,24 @@ nonisolated enum ScrollStitch {
                 rows: overlap,
                 width: base.width
             )
-            if score < bestScore - 1 {
-                bestScore = score
-                bestOverlap = overlap
+            if score <= maximumMeanDifference {
+                scored.append((overlap, score))
             }
         }
-        guard let overlap = bestOverlap, bestScore <= maximumMeanDifference else { return nil }
+        guard !scored.isEmpty else { return nil }
+        let minScore = scored.map(\.score).min()!
+        let scoreSlack = 1.0
+        let candidates = scored.filter { $0.score <= minScore + scoreSlack }
+        let overlap: Int
+        if let preferredOverlap {
+            overlap = candidates.min(by: {
+                abs($0.overlap - preferredOverlap) < abs($1.overlap - preferredOverlap)
+            })!.overlap
+        } else {
+            overlap = candidates.map(\.overlap).max()!
+        }
+        let bestScore = candidates.first(where: { $0.overlap == overlap })!.score
+        guard bestScore <= maximumMeanDifference else { return nil }
         let appended = next.height - overlap
         guard appended >= 2 else { return nil }
         var pixels = base.pixels
@@ -111,20 +132,42 @@ nonisolated enum ScrollStitch {
         width: Int
     ) -> Double {
         var total = 0.0
-        let samples = min(width, 32)
-        let step = max(1, width / samples)
+        let step = max(1, width / 96)
         var count = 0
         for row in 0..<rows {
-            for column in stride(from: 0, to: width, by: step) {
-                let left = ((firstRow + row) * width + column) * 4
-                let right = ((secondRow + row) * width + column) * 4
-                for channel in 0..<3 {
-                    total += abs(Double(first.pixels[left + channel]) - Double(second.pixels[right + channel]))
-                }
-                count += 3
-            }
+            accumulateRowDifference(
+                first, firstRow: firstRow + row,
+                second, secondRow: secondRow + row,
+                width: width,
+                step: step,
+                into: &total,
+                count: &count
+            )
         }
         guard count > 0 else { return .greatestFiniteMagnitude }
         return total / Double(count)
+    }
+
+    private static func accumulateRowDifference(
+        _ first: CapturedSlice,
+        firstRow: Int,
+        _ second: CapturedSlice,
+        secondRow: Int,
+        width: Int,
+        step: Int,
+        into total: inout Double,
+        count: inout Int
+    ) {
+        let gutter = min(width, 72)
+        var column = 0
+        while column < width {
+            let left = (firstRow * width + column) * 4
+            let right = (secondRow * width + column) * 4
+            for channel in 0..<3 {
+                total += abs(Double(first.pixels[left + channel]) - Double(second.pixels[right + channel]))
+            }
+            count += 3
+            column += column < gutter ? 1 : step
+        }
     }
 }

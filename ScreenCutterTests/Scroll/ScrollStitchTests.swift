@@ -71,6 +71,29 @@ final class ScrollStitchTests: XCTestCase {
         XCTAssertEqual(ScrollStitch.meanDifference(frame, frame), 0)
     }
 
+    /// Repeating row bands can score well at several overlap lengths. A short
+    /// accidental match would skip most of the scrolled content (folded line
+    /// numbers in real captures). Prefer the overlap closest to the expected
+    /// scroll step.
+    func testJoinPicksExpectedOverlapOnRepeatingRows() {
+        let base = repeatingSlice(rows: 0..<100, period: 12)
+        let shift = 24
+        let next = repeatingSlice(rows: shift..<(shift + 100), period: 12)
+        let expected = 100 - shift
+        let joined = ScrollStitch.join(
+            base: base,
+            next: next,
+            preferredOverlap: expected,
+            overlapRange: (expected - 20)...(expected + 20)
+        )
+        XCTAssertEqual(joined?.overlap, expected)
+        XCTAssertEqual(joined?.image.height, 100 + shift)
+    }
+
+    private func repeatingSlice(rows: Range<Int>, period: Int) -> CapturedSlice {
+        slice(width: 8, rows: rows.map { UInt8(($0 % period) * 17) })
+    }
+
     private func slice(width: Int, rows: [UInt8]) -> CapturedSlice {
         var pixels: [UInt8] = []
         for row in rows {
